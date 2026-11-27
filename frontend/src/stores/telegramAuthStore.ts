@@ -34,11 +34,9 @@ function load2FAStorage(): TwoFALocalStorage {
       if (data.expires > Date.now()) {
         // 旧版本载荷无 token 字段: 视为已解锁但缺会话凭证, 首个业务请求 403 后触发重验补发
         return { unlocked: true, token: data.token || '' }
-      } else {
-        localStorage.removeItem('tg_hub_2fa_unlocked')
       }
     } catch {
-      localStorage.removeItem('tg_hub_2fa_unlocked')
+      return { unlocked: false, token: '' }
     }
   }
   return { unlocked: false, token: '' }
@@ -84,6 +82,10 @@ export const useTelegramAuthStore = defineStore('telegramAuth', () => {
 
   function captureAdmissionRead() {
     return { admissionGeneration, bootstrapGeneration }
+  }
+
+  function isAdmissionReadCurrent(read: ReturnType<typeof captureAdmissionRead>): boolean {
+    return read.admissionGeneration === admissionGeneration
   }
 
   function syncAdmissionStatus(
@@ -507,6 +509,7 @@ export const useTelegramAuthStore = defineStore('telegramAuth', () => {
     defaultPhoneConfigured,
     defaultPhoneValid,
     captureAdmissionRead,
+    isAdmissionReadCurrent,
     syncAdmissionStatus,
     enterRestrictedMode,
     enterLockedMode,

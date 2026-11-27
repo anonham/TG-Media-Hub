@@ -446,4 +446,56 @@ describe('Task components drawer and batch regressions', () => {
 
     wrapper.unmount()
   })
+
+  it('requires explicit opt-in checkbox before deleting download temporary files in TaskDetailDrawer', async () => {
+    const taskStore = useTaskStore()
+    vi.spyOn(taskStore, 'selectTask').mockResolvedValue(undefined as never)
+    vi.spyOn(taskStore, 'fetchTaskById').mockResolvedValue(makeTask('dl-1', 'download_link', 4))
+    const deleteSpy = vi.spyOn(taskStore, 'deleteTask').mockResolvedValue(undefined as never)
+
+    const wrapper = mount(TaskDetailDrawer, {
+      props: { show: true, taskId: 'dl-1' },
+      global: {
+        stubs: {
+          NDrawer: { props: ['show', 'width'], template: '<div><slot /></div>' },
+          NDrawerContent: { template: '<div><slot name="header" /><slot /></div>' },
+          NTabs: { template: '<div><slot /></div>' },
+          NTabPane: { template: '<div><slot /></div>' },
+          NTag: { template: '<span><slot /></span>' },
+          NButton: { template: '<button><slot /></button>' },
+          NSpin: { template: '<div><slot /></div>' },
+          NEmpty: { template: '<div />' },
+          TaskLogTerminal: { template: '<div />' },
+          TaskRealtimeMetricsTab: { template: '<div />' },
+          TaskParamsMetadataTab: { template: '<div />' },
+          TaskDiagnosisTab: { template: '<div />' },
+        },
+      },
+    })
+
+    await flushPromises()
+    const vm = wrapper.vm as unknown as { handleDelete: () => void }
+
+    // Default deletion keeps deleteFiles = false
+    vm.handleDelete()
+    const firstDialog = vi.mocked(dialog.warning).mock.calls[0][0] as {
+      content: () => unknown
+      onPositiveClick: () => void
+    }
+    firstDialog.onPositiveClick()
+    expect(deleteSpy).toHaveBeenNthCalledWith(1, 'dl-1', false)
+
+    // Checking the rendered checkbox opts into deleteFiles = true
+    vm.handleDelete()
+    const secondDialog = vi.mocked(dialog.warning).mock.calls[1][0] as unknown as {
+      content: () => { children: Array<{ props?: { 'onUpdate:checked'?: (v: boolean) => void } }> }
+      onPositiveClick: () => void
+    }
+    const vnode = secondDialog.content()
+    vnode.children[1].props?.['onUpdate:checked']?.(true)
+    secondDialog.onPositiveClick()
+    expect(deleteSpy).toHaveBeenNthCalledWith(2, 'dl-1', true)
+
+    wrapper.unmount()
+  })
 })

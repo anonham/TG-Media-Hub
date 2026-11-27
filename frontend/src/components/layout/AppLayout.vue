@@ -46,7 +46,7 @@
           <p>请在弹出的认证窗口中输入 API Key 与 Telegram 动态口令以解锁控制台</p>
           <div class="locked-btn-row">
             <n-button
-              v-if="authStore.isAuthRequired && !authStore.apiKey"
+              v-if="authStore.isAuthRequired && (!authStore.apiKey || !authStore.isKeyVerified)"
               type="primary"
               secondary
               @click="authStore.openAuthModal('请输入 API Key 解锁控制台')"
@@ -122,7 +122,7 @@ const isReady = computed(() => {
   if (tgAuthStore.isRestricted || tgAuthStore.admissionPhase === 'error') return false
   if (!authStore.isAuthChecked) return false
   if (!authStore.isAuthRequired) return true
-  return !!authStore.apiKey && tgAuthStore.isWeb2FAUnlocked
+  return !!authStore.apiKey && authStore.isKeyVerified && tgAuthStore.isWeb2FAUnlocked
 })
 
 // 会话首次 2FA 解锁追踪: 区分"初次登录向导准入"与"运行期 2FA 会话过期软重验"
@@ -149,7 +149,7 @@ const isHardLocked = computed(() => {
   if (tgAuthStore.isRestricted || tgAuthStore.admissionPhase === 'error') return true
   if (!authStore.isAuthChecked) return true
   if (!authStore.isAuthRequired) return false
-  if (!authStore.apiKey) return true
+  if (!authStore.apiKey || !authStore.isKeyVerified) return true
   return !hasEverUnlocked.value && !tgAuthStore.isWeb2FAUnlocked
 })
 
@@ -165,11 +165,11 @@ async function initTelegramAuth() {
 
 // 监听 API Key 变更 (登录后触发 Telegram 2FA 探测; 凭证注销时重置 2FA 首通态)
 watch(
-  () => authStore.apiKey,
+  () => (authStore.apiKey && authStore.isKeyVerified ? authStore.apiKey : ''),
   (newKey) => {
     if (newKey) {
       initTelegramAuth()
-    } else {
+    } else if (!authStore.apiKey) {
       hasEverUnlocked.value = false
     }
   },

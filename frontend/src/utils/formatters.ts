@@ -27,11 +27,11 @@ export function formatDcLocation(dcId: number | string | null | undefined, short
  * 格式化字节大小为易读文本 (基于 1024 二进制阶梯，采用行业通用 KB/MB/GB/TB 标识)。
  */
 export function formatBytes(bytes: number | null | undefined, decimals = 2): string {
-  if (!bytes || bytes === 0) return '0 B'
+  if (!bytes || bytes <= 0 || !Number.isFinite(bytes)) return '0 B'
   const k = 1024
   const dm = decimals < 0 ? 0 : decimals
   const sizes = ['B', 'KB', 'MB', 'GB', 'TB']
-  const i = Math.floor(Math.log(bytes) / Math.log(k))
+  const i = Math.min(sizes.length - 1, Math.max(0, Math.floor(Math.log(bytes) / Math.log(k))))
   return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i]
 }
 

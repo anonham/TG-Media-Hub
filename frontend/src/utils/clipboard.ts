@@ -15,14 +15,18 @@ function execCommandCopy(text: string): boolean {
   // 键盘用户会丢失复制前的位置
   const previousActive = document.activeElement
   document.body.appendChild(textArea)
-  textArea.focus()
-  textArea.select()
-  const successful = document.execCommand('copy')
-  document.body.removeChild(textArea)
-  if (previousActive instanceof HTMLElement) {
-    previousActive.focus()
+  try {
+    textArea.focus()
+    textArea.select()
+    return document.execCommand('copy')
+  } finally {
+    if (textArea.parentNode) {
+      textArea.parentNode.removeChild(textArea)
+    }
+    if (previousActive instanceof HTMLElement) {
+      previousActive.focus()
+    }
   }
-  return successful
 }
 
 /**

@@ -273,9 +273,15 @@ interface PikPakPublishSnapshot {
   payload: PikPakPublishRequest
 }
 
+function normalizeAccountId(val: unknown): number | null {
+  if (val === '' || val === null || val === undefined) return null
+  const num = Number(val)
+  return Number.isFinite(num) ? num : null
+}
+
 function capturePublishSnapshot(): PikPakPublishSnapshot {
   const target = selectedTarget.value || ''
-  const accountId = selectedAccountId.value ?? null
+  const accountId = normalizeAccountId(selectedAccountId.value)
   const selectionKey = currentSelectionKey()
   const effConcurrency = uploadConcurrency.value ? Math.max(1, Math.min(Math.round(uploadConcurrency.value), 16)) : null
   const effInFlight = uploadInFlight.value ? Math.max(1, Math.min(Math.round(uploadInFlight.value), 4)) : null
@@ -346,7 +352,7 @@ function capturePublishSnapshot(): PikPakPublishSnapshot {
 function isSnapshotStale(snapshot: PikPakPublishSnapshot): boolean {
   return (
     (selectedTarget.value || '') !== snapshot.target ||
-    (selectedAccountId.value ?? null) !== snapshot.accountId ||
+    normalizeAccountId(selectedAccountId.value) !== snapshot.accountId ||
     currentSelectionKey() !== snapshot.selectionKey
   )
 }
@@ -360,7 +366,7 @@ async function runInspect(target: string, accountId: number | null, selectionKey
     !isMounted ||
     gen !== inspectGen ||
     (selectedTarget.value || '') !== target ||
-    (selectedAccountId.value ?? null) !== accountId ||
+    normalizeAccountId(selectedAccountId.value) !== accountId ||
     currentSelectionKey() !== selectionKey
   ) {
     return null
@@ -375,7 +381,7 @@ async function handleInspect() {
     return
   }
   const target = selectedTarget.value
-  const accountId = selectedAccountId.value ?? null
+  const accountId = normalizeAccountId(selectedAccountId.value)
   const selectionKey = currentSelectionKey()
   const callId = ++inspectCallId
   inspecting.value = true

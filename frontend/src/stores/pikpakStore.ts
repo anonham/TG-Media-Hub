@@ -87,13 +87,17 @@ export const usePikpakStore = defineStore('pikpak', () => {
   // ── 鉴权状态 ─────────────────────────────────────────────
   const authStatus = ref<PikPakAuthStatus | null>(null)
   const authStatusLoading = ref(false)
+  let authStatusReqSeq = 0
 
   async function fetchAuthStatus(force = false) {
+    const reqSeq = ++authStatusReqSeq
     authStatusLoading.value = true
     try {
       const res = await pikpakApi.authStatus(force)
+      if (reqSeq !== authStatusReqSeq) return
       authStatus.value = (res.data as PikPakAuthStatus) || null
     } catch (err: unknown) {
+      if (reqSeq !== authStatusReqSeq) return
       authStatus.value = {
         logged_in: false,
         state: 'unreachable',
@@ -101,7 +105,9 @@ export const usePikpakStore = defineStore('pikpak', () => {
         fetchError: errDetail(err, '连接异常'),
       }
     } finally {
-      authStatusLoading.value = false
+      if (reqSeq === authStatusReqSeq) {
+        authStatusLoading.value = false
+      }
     }
   }
 
@@ -149,6 +155,15 @@ export const usePikpakStore = defineStore('pikpak', () => {
     devicePollTimer = setTimeout(pollDeviceOnce, Math.max(1, deviceFlow.value.interval || 5) * 1000)
   }
 
+  function isSafeHttpsUri(uri: unknown): uri is string {
+    if (typeof uri !== 'string' || !uri.trim()) return false
+    try {
+      return new URL(uri).protocol === 'https:'
+    } catch {
+      return false
+    }
+  }
+
   async function startDeviceLogin(): Promise<boolean> {
     stopDeviceFlow()
     const gen = ++deviceFlowGen
@@ -163,11 +178,20 @@ export const usePikpakStore = defineStore('pikpak', () => {
         interval?: number
         expires_in?: number
       }
+      if (!isSafeHttpsUri(data.verification_uri)) {
+        deviceFlow.value = {
+          ...deviceFlow.value,
+          phase: 'failed',
+          verificationUri: '',
+          errorMsg: '授权链接无效，请稍后重试',
+        }
+        return false
+      }
       deviceFlow.value = {
         phase: 'polling',
         deviceCode: data.device_code || '',
         userCode: data.user_code || '',
-        verificationUri: data.verification_uri || '',
+        verificationUri: data.verification_uri,
         interval: data.interval || 5,
         expiresAt: data.expires_in ? Date.now() + data.expires_in * 1000 : 0,
         lastStatus: '',
@@ -229,6 +253,13 @@ export const usePikpakStore = defineStore('pikpak', () => {
   const FOLDER_CACHE_TTL_MS = 45_000
   const folderCache = ref<Record<string, FolderCacheEntry>>({})
   let folderCacheGeneration = 0
+  const folderReqSeq = new Map<string, number>()
+
+  function nextFolderSeq(key: string): number {
+    const next = (folderReqSeq.get(key) || 0) + 1
+    folderReqSeq.set(key, next)
+    return next
+  }
 
   function cacheEntry(folderId?: string | null): FolderCacheEntry | null {
     return folderCache.value[folderId || ''] || null
@@ -245,6 +276,7 @@ export const usePikpakStore = defineStore('pikpak', () => {
     const cacheFresh = existing?.loaded && Date.now() - (existing.loadedAt || 0) < FOLDER_CACHE_TTL_MS
     if (existing && !append && !force && cacheFresh) return existing
     const generation = folderCacheGeneration
+    const reqSeq = nextFolderSeq(key)
     const pageToken = append ? existing?.nextPageToken || null : null
     folderCache.value = {
       ...folderCache.value,
@@ -258,7 +290,7 @@ export const usePikpakStore = defineStore('pikpak', () => {
     }
     try {
       const res = await pikpakApi.fileList(key, pageToken, force)
-      if (generation !== folderCacheGeneration) return undefined
+      if (generation !== folderCacheGeneration || folderReqSeq.get(key) !== reqSeq) return undefined
       const data = (res.data || {}) as PikPakFileListResponse
       const newItems = Array.isArray(data.items) ? data.items : []
       const entry: FolderCacheEntry = {
@@ -272,7 +304,7 @@ export const usePikpakStore = defineStore('pikpak', () => {
       folderCache.value = { ...folderCache.value, [key]: entry }
       return entry
     } catch (err: unknown) {
-      if (generation !== folderCacheGeneration) return undefined
+      if (generation !== folderCacheGeneration || folderReqSeq.get(key) !== reqSeq) return undefined
       folderCache.value = {
         ...folderCache.value,
         [key]: {
@@ -297,10 +329,14 @@ export const usePikpakStore = defineStore('pikpak', () => {
     // 保留根目录, 任务终态回调用此形态失效远端目录状态时根条目 45s TTL 内陈旧
     if (keepFolderId === null) {
       folderCacheGeneration += 1
+      folderReqSeq.clear()
       folderCache.value = {}
       return
     }
     const keepKey = keepFolderId || ''
+    for (const k of new Set([...folderReqSeq.keys(), ...Object.keys(folderCache.value)])) {
+      if (k !== keepKey) nextFolderSeq(k)
+    }
     folderCache.value = Object.fromEntries(Object.entries(folderCache.value).filter(([k]) => k === keepKey))
   }
 
@@ -388,17 +424,14 @@ export const usePikpakStore = defineStore('pikpak', () => {
     const roots = dirRules.filter((r) => !dirRules.some((o) => o !== r && o.dirTree && o.dirTree[r.dirId]))
     const buildNode = (rule: DirSelectionRule): SelectionTreeNode => {
       const childRules = childrenOf(rule)
-      const childFids = new Set<string>()
-      for (const c of childRules) for (const fid of c.leaves.keys()) childFids.add(fid)
-      const childRelSet = new Set(childRules.map((r) => rule.dirTree[r.dirId]))
+      const children = childRules.map((r) => buildNode(r))
+      const renderedInChildren = new Set<string>()
+      for (const c of children) for (const l of c.allLeaves) renderedInChildren.add(l.fid)
       const directLeaves: Array<{ fid: string; name: string; selected: boolean; item: PikPakFileItem }> = []
       for (const [fid, item] of rule.leaves) {
-        if (childFids.has(fid)) continue
-        const parentRel = (rule.dirTree && item.parent_id && rule.dirTree[item.parent_id]) || rule.dirName
-        if (childRelSet.has(parentRel)) continue
+        if (renderedInChildren.has(fid)) continue
         directLeaves.push({ fid, name: item.name || '', selected: selectedFiles.value.has(fid), item })
       }
-      const children = childRules.map((r) => buildNode(r))
       const allLeaves = [...directLeaves]
       for (const c of children) for (const l of c.allLeaves) allLeaves.push(l)
       const selectedCount = allLeaves.filter((l) => l.selected).length
@@ -500,8 +533,10 @@ export const usePikpakStore = defineStore('pikpak', () => {
     selectionRules.value = [...selectionRules.value, initialRule]
     // 通过 findDirRule 获取 Vue 响应式 Proxy，确保递归遍历与完成赋值全部触发响应式依赖通知
     const reactiveRule = findDirRule(item.file_id) || initialRule
+    const isStillCurrent = () => !reactiveRule.aborted && selectionRules.value.includes(reactiveRule)
     try {
       const { leaves, truncated } = await walkSubtree(item, reactiveRule)
+      if (!isStillCurrent()) return
       excludedFileIds.value = new Set([...excludedFileIds.value].filter((id) => !leaves.has(id)))
       reactiveRule.leaves = leaves
       reactiveRule.loading = false
@@ -514,16 +549,22 @@ export const usePikpakStore = defineStore('pikpak', () => {
         )
       }
     } catch (err: unknown) {
-      selectionRules.value = selectionRules.value.filter((r) => !(r.kind === 'dir' && r.dirId === item.file_id))
-      if (reactiveRule.aborted) {
-        message.info(`已取消展开目录 ${item.name}`)
-      } else {
-        message.warning(`目录展开失败: ${item.name} (${errDetail(err)})`)
+      const wasPresent = selectionRules.value.includes(reactiveRule)
+      if (wasPresent) {
+        selectionRules.value = selectionRules.value.filter((r) => r !== reactiveRule)
+        if (reactiveRule.aborted) {
+          message.info(`已取消展开目录 ${item.name}`)
+        } else {
+          message.warning(`目录展开失败: ${item.name} (${errDetail(err)})`)
+        }
       }
     }
   }
 
   function removeDirRule(dirId: string) {
+    for (const r of selectionRules.value) {
+      if (r.kind === 'dir' && r.dirId === dirId) r.aborted = true
+    }
     selectionRules.value = selectionRules.value.filter((r) => !(r.kind === 'dir' && r.dirId === dirId))
   }
 
@@ -580,6 +621,9 @@ export const usePikpakStore = defineStore('pikpak', () => {
   }
 
   function clearSelection() {
+    for (const r of selectionRules.value) {
+      if (r.kind === 'dir') r.aborted = true
+    }
     selectionRules.value = []
     excludedFileIds.value = new Set()
   }

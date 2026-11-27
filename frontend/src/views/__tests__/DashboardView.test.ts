@@ -6,6 +6,7 @@ import DashboardView from '../DashboardView.vue'
 import { useAccountStore } from '@/stores/accountStore'
 import { useLogStore } from '@/stores/logStore'
 import { useStorageStore } from '@/stores/storageStore'
+import { useTaskStore } from '@/stores/taskStore'
 import { useTelegramAuthStore } from '@/stores/telegramAuthStore'
 
 vi.mock('vue-router', () => ({ useRouter: () => ({ push: vi.fn() }) }))
@@ -55,6 +56,16 @@ it('shows initialization progress, degraded details and green readiness without 
   telegram.isConnected = false
   await nextTick()
   expect(status.classes()).toContain('offline')
+
+  const taskStore = useTaskStore()
+  taskStore.tasks = [
+    { id: '1', status: 'running', progress: { speed_mb_s: 3.5 } },
+    { id: '2', status: 'running', progress: { speed_mb_s: 4.25 } },
+  ] as never
+  taskStore.currentMetrics.speed = 0
+  await nextTick()
+  expect(wrapper.get('.metric-main-value').text()).toContain('7.75 MB/s')
+
   wrapper.unmount()
   vi.restoreAllMocks()
 })

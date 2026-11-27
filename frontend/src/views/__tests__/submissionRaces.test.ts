@@ -18,9 +18,17 @@ const mocks = vi.hoisted(() => ({
     submitFolderPublish: vi.fn(),
   },
   preset: { loadPresets: vi.fn(), inspectPresetChannel: vi.fn() },
-  forward: { clearCoverage: vi.fn() },
+  forward: {
+    clearCoverage: vi.fn(),
+    clearGaps: vi.fn(),
+    clearEstimate: vi.fn(),
+    loadCoverage: vi.fn(),
+    loadGaps: vi.fn(),
+    fetchEstimate: vi.fn(),
+  },
   pikpak: {
     inspectSelection: vi.fn(),
+    publishPikpak: vi.fn(),
     selectedFiles: new Map([['file', { path: '/file' }]]),
     selectionView: { dirGroups: [], singles: [], combinedDirTree: {} },
     selectedTotalBytes: 1,
@@ -410,5 +418,57 @@ describe('submission race regressions', () => {
     await pending
     expect(state.inspectResult).toBeNull()
     expect(mocks.dialog.warning).not.toHaveBeenCalled()
+  })
+
+  it('keeps ForwardView loadCoverage active when range is omitted and clears on source/target change', async () => {
+    vi.useFakeTimers()
+    try {
+      const { state } = setup(Forward)
+      Object.assign(state, { sourceChat: 'src-a', selectedTarget: 'tgt-1' })
+      await nextTick()
+      expect(mocks.forward.clearCoverage).toHaveBeenCalledTimes(1)
+      vi.clearAllMocks()
+
+      await vi.advanceTimersByTimeAsync(600)
+
+      expect(mocks.forward.loadCoverage).toHaveBeenCalledWith('src-a', 'tgt-1', null, null)
+      expect(mocks.forward.clearGaps).toHaveBeenCalledTimes(1)
+      expect(mocks.forward.clearEstimate).toHaveBeenCalledTimes(1)
+      expect(mocks.forward.clearCoverage).not.toHaveBeenCalled()
+
+      Object.assign(state, { selectedTarget: 'tgt-2' })
+      await nextTick()
+      expect(mocks.forward.clearCoverage).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('normalizes empty-string automatic account selection to null in PikPakPublishView', async () => {
+    const { state } = setup(PikPak)
+    state.selectedTarget = 'tgt-1'
+    state.selectedAccountId = ''
+    await nextTick()
+
+    mocks.pikpak.inspectSelection.mockResolvedValue({
+      accessible: true,
+      has_write_permission: true,
+      files_total: 1,
+      files_ready: 1,
+      files_audit_blocked: 0,
+      audit_blocked_names: [],
+    })
+    mocks.pikpak.publishPikpak.mockResolvedValue({ success: false })
+    await state.handleInspect()
+    expect(mocks.pikpak.inspectSelection).toHaveBeenCalledWith('tgt-1', null)
+
+    await state.handleSubmit()
+    const warning = mocks.dialog.warning.mock.calls[0]?.[0]
+    if (warning?.onPositiveClick) {
+      await warning.onPositiveClick()
+    }
+    const snapshot = state.capturePublishSnapshot()
+    expect(snapshot.accountId).toBeNull()
+    expect('account_id' in snapshot.payload).toBe(false)
   })
 })

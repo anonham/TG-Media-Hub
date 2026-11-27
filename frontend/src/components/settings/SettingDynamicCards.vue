@@ -27,27 +27,6 @@
       </div>
     </div>
 
-    <!-- 中转加速原理说明卡 -->
-    <div v-else-if="card.key === 'transit'" class="transit-explainer-card cockpit-card">
-      <div class="explainer-header">
-        <span class="explainer-icon">💡</span>
-        <span class="explainer-title">功能原理与优势</span>
-      </div>
-      <div class="explainer-body">
-        <p>
-          <strong>Telegram 官方对单个主账号施加了严格的下行带宽与频控限制</strong>，而辅助 Bot 享有独立的 API 带宽配额。
-        </p>
-        <p>
-          开启本功能后，下载私密频道大文件时，主账号会将文件静默同步至私有中转群，调度所有就绪辅助 Bot
-          与主账号组成<strong>“联合下载集群”</strong>分块多路拉取，下载速率提升
-          <span class="highlight-boost">3~5 倍</span>！
-        </p>
-        <p>
-          下载完成后系统自动物理清理中转群消息，做到<strong>阅后即焚、无痕安全</strong>。若未配置群组或较小文件，系统将智能降级为直连下载，不影响正常使用。
-        </p>
-      </div>
-    </div>
-
     <!-- 转发纯净过滤说明卡 -->
     <div v-else-if="card.kind === 'explainer'" class="forward-explainer-card cockpit-card">
       <div class="explainer-header">
@@ -66,6 +45,27 @@
       class="settings-section"
     >
       <div class="section-indicator">{{ card.title }}</div>
+      <!-- 中转加速原理说明卡 (与可编辑配置控件共同渲染) -->
+      <div v-if="card.key === 'transit'" class="transit-explainer-card cockpit-card">
+        <div class="explainer-header">
+          <span class="explainer-icon">💡</span>
+          <span class="explainer-title">功能原理与优势</span>
+        </div>
+        <div class="explainer-body">
+          <p>
+            <strong>Telegram 官方对单个主账号施加了严格的下行带宽与频控限制</strong>，而辅助 Bot 享有独立的 API
+            带宽配额。
+          </p>
+          <p>
+            开启本功能后，下载私密频道大文件时，主账号会将文件静默同步至私有中转群，调度所有就绪辅助 Bot
+            与主账号组成<strong>“联合下载集群”</strong>分块多路拉取，下载速率提升
+            <span class="highlight-boost">3~5 倍</span>！
+          </p>
+          <p>
+            下载完成后系统自动物理清理中转群消息，做到<strong>阅后即焚、无痕安全</strong>。若未配置群组或较小文件，系统将智能降级为直连下载，不影响正常使用。
+          </p>
+        </div>
+      </div>
       <div class="cockpit-card setting-card-group">
         <template v-if="card.items.length > 0">
           <div v-for="item in card.items" :key="item.key" class="setting-row-item">

@@ -66,6 +66,28 @@ describe('pikpakStore Unit Tests', () => {
       expect(store.authStatus?.fetchError).toContain('Network error')
       expect(store.authStatusLoading).toBe(false)
     })
+
+    it('ignores older fetchAuthStatus response when a newer probe finishes first', async () => {
+      const store = usePikpakStore()
+      let resolveOld!: (v: unknown) => void
+      vi.mocked(pikpakApi.authStatus)
+        .mockImplementationOnce(
+          () =>
+            new Promise((r) => {
+              resolveOld = r
+            }) as never,
+        )
+        .mockResolvedValueOnce({ data: { logged_in: true, state: 'logged_in', state_reason: null } } as never)
+
+      const oldProbe = store.fetchAuthStatus()
+      await store.fetchAuthStatus(true)
+      expect(store.authStatus?.logged_in).toBe(true)
+
+      resolveOld({ data: { logged_in: false, state: 'not_bound', state_reason: null } })
+      await oldProbe
+      expect(store.authStatus?.logged_in).toBe(true)
+      expect(store.authStatusLoading).toBe(false)
+    })
   })
 
   describe('Device Flow Lifecycle', () => {
@@ -117,6 +139,20 @@ describe('pikpakStore Unit Tests', () => {
       expect(store.deviceFlow.phase).toBe('success')
       expect(store.deviceFlow.lastStatus).toBe('success')
     })
+
+    it.each(['javascript:alert(1)', 'http://insecure.example.com/auth', ''])(
+      'rejects unsafe or missing verification_uri %s in startDeviceLogin',
+      async (badUri) => {
+        const store = usePikpakStore()
+        vi.mocked(pikpakApi.deviceStart).mockResolvedValueOnce({
+          data: { device_code: 'd1', user_code: 'U1', verification_uri: badUri, interval: 5, expires_in: 60 },
+        } as never)
+
+        expect(await store.startDeviceLogin()).toBe(false)
+        expect(store.deviceFlow.phase).toBe('failed')
+        expect(store.deviceFlow.verificationUri).toBe('')
+      },
+    )
   })
 
   describe('fetchFolder & Cache Behavior', () => {
@@ -199,6 +235,24 @@ describe('pikpakStore Unit Tests', () => {
       store.clearCache('dir2')
       expect(store.cacheEntry('dir1')).toBeNull()
       expect(store.cacheEntry('dir2')).not.toBeNull()
+    })
+
+    it('invalidates in-flight fetchFolder for a folder dropped by partial clearCache', async () => {
+      const store = usePikpakStore()
+      let resolveChild!: (v: unknown) => void
+      vi.mocked(pikpakApi.fileList).mockImplementationOnce(
+        () =>
+          new Promise((r) => {
+            resolveChild = r
+          }) as never,
+      )
+
+      const pendingChild = store.fetchFolder('child1')
+      store.clearCache('')
+      resolveChild({ data: { items: [{ file_id: 'old', name: 'old.mp4', is_dir: false, size_bytes: 1 }] } })
+
+      expect(await pendingChild).toBeUndefined()
+      expect(store.cacheEntry('child1')).toBeNull()
     })
   })
 
@@ -325,6 +379,74 @@ describe('pikpakStore Unit Tests', () => {
       store.toggleFile(f1)
       expect(store.isSelected('ep1')).toBe(true)
       expect(store.selectedFiles.size).toBe(2)
+    })
+
+    it('keeps ancestor leaves visible when a child dir rule has an empty snapshot', () => {
+      const store = usePikpakStore()
+      const fileInB: PikPakFileItem = {
+        file_id: 'f-new',
+        name: 'new.mp4',
+        is_dir: false,
+        size_bytes: 100,
+        parent_id: 'B',
+      }
+      store.selectionRules = [
+        {
+          kind: 'dir',
+          dirId: 'A',
+          dirName: 'A',
+          dirPath: 'A',
+          leaves: new Map([['f-new', fileInB]]),
+          dirTree: { A: 'A', B: 'A/B' },
+          loading: false,
+          foundCount: 1,
+          aborted: false,
+        },
+        {
+          kind: 'dir',
+          dirId: 'B',
+          dirName: 'B',
+          dirPath: 'B',
+          leaves: new Map(),
+          dirTree: { B: 'B' },
+          loading: false,
+          foundCount: 0,
+          aborted: false,
+        },
+      ]
+
+      expect(store.selectionTree[0].directLeaves.map((l) => l.fid)).toEqual(['f-new'])
+    })
+
+    it('prevents a retired toggleDir walk from removing or clobbering a replacement walk', async () => {
+      const store = usePikpakStore()
+      let rejectOld!: (err: Error) => void
+      vi.mocked(pikpakApi.fileList)
+        .mockImplementationOnce(
+          () =>
+            new Promise((_r, reject) => {
+              rejectOld = reject
+            }) as never,
+        )
+        .mockResolvedValueOnce({
+          data: {
+            items: [{ file_id: 'new-file', name: 'new.mp4', is_dir: false, size_bytes: 5 }],
+            next_page_token: null,
+          },
+        } as never)
+
+      const dirItem: PikPakFileItem = { file_id: 'd1', name: 'Dir1', is_dir: true, size_bytes: 0 }
+      const firstWalk = store.toggleDir(dirItem)
+      store.removeDirRule('d1')
+      store.clearCache()
+      const secondWalk = store.toggleDir(dirItem)
+      await secondWalk
+
+      rejectOld(new Error('stale failure'))
+      await firstWalk
+
+      expect(store.selectionRules).toHaveLength(1)
+      expect(store.isSelected('new-file')).toBe(true)
     })
   })
 })

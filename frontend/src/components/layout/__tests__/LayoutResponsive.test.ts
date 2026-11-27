@@ -142,4 +142,41 @@ describe('Layout responsive and accessibility regressions', () => {
 
     wrapper.unmount()
   })
+
+  it('keeps AppLayout hard-locked until stored API key passes verification even when 2FA is cached', async () => {
+    const authStore = useAuthStore()
+    const tgAuthStore = useTelegramAuthStore()
+    const taskStore = useTaskStore()
+
+    authStore.apiKey = 'stale-remembered-key'
+    authStore.isAuthRequired = true
+    authStore.isAuthChecked = true
+    authStore.isKeyVerified = false
+    tgAuthStore.admissionPhase = 'admitted'
+    tgAuthStore.isWeb2FAUnlocked = true
+
+    vi.spyOn(authStore, 'checkAuthStatus').mockResolvedValue(false)
+    const startSpy = vi.spyOn(taskStore, 'startPolling').mockImplementation(() => {})
+    const wsSpy = vi.spyOn(taskStore, 'initWebSocket').mockResolvedValue(undefined)
+
+    const wrapper = mount(AppLayout, {
+      global: {
+        stubs: {
+          NButton: { template: '<button><slot /></button>' },
+          NAlert: { template: '<div><slot /></div>' },
+          NIcon: { template: '<i><slot /></i>' },
+          NTooltip: NTooltipStub,
+          RouterLink: RouterLinkStub,
+          RouterView: { template: '<div data-testid="router-view-mounted" />' },
+        },
+      },
+    })
+
+    expect(wrapper.find('.locked-placeholder').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="router-view-mounted"]').exists()).toBe(false)
+    expect(startSpy).not.toHaveBeenCalled()
+    expect(wsSpy).not.toHaveBeenCalled()
+
+    wrapper.unmount()
+  })
 })

@@ -133,5 +133,29 @@ describe('forwardStore Unit Tests', () => {
       expect(store.gaps).toEqual([])
       expect(store.estimate).toBeNull()
     })
+
+    it('clearGaps and clearEstimate preserve an in-flight loadCoverage response', async () => {
+      const store = useForwardStore()
+      let resolveCov!: (v: unknown) => void
+      vi.mocked(forwardApi.getCoverage).mockReturnValueOnce(
+        new Promise((r) => {
+          resolveCov = r
+        }) as never,
+      )
+
+      const pending = store.loadCoverage('-100111', '-100222')
+      store.clearGaps()
+      store.clearEstimate()
+
+      resolveCov({
+        data: {
+          code: 0,
+          message: 'ok',
+          data: { source_chat: '-100111', target_chat: '-100222', stats: { forwarded: 42 }, forwarded_runs: [] },
+        },
+      })
+      await pending
+      expect(store.coverage?.stats?.forwarded).toBe(42)
+    })
   })
 })

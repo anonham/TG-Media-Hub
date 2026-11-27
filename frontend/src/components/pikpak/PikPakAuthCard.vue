@@ -77,8 +77,8 @@
           </div>
           <div class="device-actions">
             <a
-              v-if="deviceFlow.verificationUri"
-              :href="deviceFlow.verificationUri"
+              v-if="safeVerificationUri"
+              :href="safeVerificationUri"
               target="_blank"
               rel="noopener noreferrer"
               style="text-decoration: none"
@@ -150,6 +150,16 @@ const authTagType = computed(() => {
 const authTagText = computed(() => {
   if (authStatus.value?.logged_in) return '已登录'
   return authStatus.value?.state === 'unreachable' ? '连接异常' : '未绑定'
+})
+const safeVerificationUri = computed(() => {
+  const raw = pikpakStore.deviceFlow.verificationUri
+  if (!raw) return ''
+  try {
+    const parsed = new URL(raw)
+    return parsed.protocol === 'https:' ? parsed.href : ''
+  } catch {
+    return ''
+  }
 })
 
 // ── 三态自愈: 非已登录态自动退避重探测 (5/15/30/60s 封顶; 设备码轮询期让位) ──

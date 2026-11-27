@@ -149,10 +149,17 @@ export function createTaskRealtime(ctx: TaskRealtimeContext): TaskRealtimeHandle
     trimLogBuffer()
   }
 
-  function resetLogStream() {
+  function clearLogBuffer() {
     newestSeq = 0
     bufferedSeqs = new Set()
     currentLogs.value = []
+  }
+
+  function resetLogStream() {
+    logsGeneration += 1
+    logsTaskId = null
+    logsFetching = false
+    clearLogBuffer()
   }
 
   async function fetchTaskLogs(taskId: string | null, { reset = false }: { reset?: boolean } = {}) {
@@ -164,7 +171,7 @@ export function createTaskRealtime(ctx: TaskRealtimeContext): TaskRealtimeHandle
     const gen = ++logsGeneration
     if (reset || logsTaskId !== taskId) {
       logsTaskId = taskId
-      resetLogStream()
+      clearLogBuffer()
     }
     logsFetching = true
     try {
@@ -394,6 +401,7 @@ export function createTaskRealtime(ctx: TaskRealtimeContext): TaskRealtimeHandle
       clearTimeout(wsReconnectTimer)
       wsReconnectTimer = null
     }
+    wsTicketRetryAttempt = 0
     // 停机即取消挂起的进度微批 flush (与缓冲一并丢弃), 不再应用延迟更新
     if (progressThrottleTimer) {
       clearTimeout(progressThrottleTimer)
@@ -448,6 +456,7 @@ export function createTaskRealtime(ctx: TaskRealtimeContext): TaskRealtimeHandle
   // 上次握手使用的底层凭证指纹: 供 reconnectWebSocket 判定凭证是否真变化
   let wsHandshakeCreds = ''
   let wsInitInFlight = false
+  let wsTicketRetryAttempt = 0
 
   function currentWsCreds(): string {
     return `${authStore.apiKey || ''}|${tgAuthStore.get2FAToken() || ''}`
@@ -466,10 +475,15 @@ export function createTaskRealtime(ctx: TaskRealtimeContext): TaskRealtimeHandle
       // token/tfa_token query 形态已收口; 取票失败静默降级为轮询接管 (轮询走双
       // Header 鉴权不受影响), 不 toast 以防断连风暴刷屏。
       let ticket = ''
+      let ticketAuthRejected = false
       try {
         const res = await authApi.issueMediaTicket()
         ticket = res.data?.ticket || ''
-      } catch (err) {
+      } catch (err: unknown) {
+        const status = (err as { response?: { status?: number } } | null)?.response?.status
+        if (status === 401 || status === 403) {
+          ticketAuthRejected = true
+        }
         console.error('WS 握手取票失败:', err)
       }
       // 取票 await 期间停机 → 放弃建连
@@ -477,8 +491,23 @@ export function createTaskRealtime(ctx: TaskRealtimeContext): TaskRealtimeHandle
       if (!ticket) {
         wsStatus.value = 'disconnected'
         scheduleNextPoll()
+        if (
+          !ticketAuthRejected &&
+          !authStore.isModalVisible &&
+          !tgAuthStore.isModalVisible &&
+          !tgAuthStore.isRestricted &&
+          !wsReconnectTimer
+        ) {
+          wsTicketRetryAttempt += 1
+          const delay = Math.min(30000, 3000 * 2 ** (wsTicketRetryAttempt - 1))
+          wsReconnectTimer = setTimeout(() => {
+            wsReconnectTimer = null
+            void initWebSocket()
+          }, delay)
+        }
         return
       }
+      wsTicketRetryAttempt = 0
 
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
       const host = window.location.host
@@ -509,6 +538,7 @@ export function createTaskRealtime(ctx: TaskRealtimeContext): TaskRealtimeHandle
     socket.onopen = () => {
       if (!isCurrentSocket()) return
       wsStatus.value = 'connected'
+      wsTicketRetryAttempt = 0
       if (wsReconnectTimer) {
         clearTimeout(wsReconnectTimer)
         wsReconnectTimer = null
@@ -535,6 +565,14 @@ export function createTaskRealtime(ctx: TaskRealtimeContext): TaskRealtimeHandle
           }
         } else if (data.type === 'task_update') {
           if (data.task_id) {
+            const taskKey = String(data.task_id)
+            if (data.status) {
+              const buffered = progressBuffer.get(taskKey)
+              if (buffered && 'status' in buffered) {
+                const { status: _superseded, ...rest } = buffered
+                progressBuffer.set(taskKey, rest)
+              }
+            }
             const t = ctx.tasks.value.find((item) => item.id === data.task_id)
             if (t) {
               if (data.status) t.status = String(data.status)

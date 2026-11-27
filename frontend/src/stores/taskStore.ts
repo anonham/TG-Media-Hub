@@ -146,6 +146,7 @@ export const useTaskStore = defineStore('task', () => {
       if (!selectedTaskId.value || !taskData.some((t) => t.id === selectedTaskId.value)) {
         selectedTaskId.value = taskData[0].id
         await fetchTaskLogs(selectedTaskId.value, { reset: true })
+        if (!tasksReqSeq.isCurrent(token)) return
       }
 
       const activeTask = taskData.find((t) => t.id === selectedTaskId.value)

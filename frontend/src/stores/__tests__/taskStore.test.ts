@@ -87,3 +87,42 @@ it('displays the active task message on retry and preserves it in batch results'
   expect(message.warning).toHaveBeenCalledWith('批量重试完成，成功 0/1')
   expect(message.error).not.toHaveBeenCalled()
 })
+
+it('does not update metrics from stale loadTasks after awaiting fetchTaskLogs', async () => {
+  setActivePinia(createPinia())
+  const store = useTaskStore()
+
+  let resolveLogs1!: (v: unknown) => void
+  vi.spyOn(tasksApi, 'getLogs')
+    .mockImplementationOnce(
+      () =>
+        new Promise((r) => {
+          resolveLogs1 = r
+        }) as never,
+    )
+    .mockResolvedValue({ data: { logs: [], has_more: false, last_seq: 0 } } as never)
+
+  vi.spyOn(tasksApi, 'list')
+    .mockResolvedValueOnce({
+      data: {
+        items: [{ id: 'task-a', task_type: 'download_link', status: 'running', progress: { percent: 10 } }],
+        total: 1,
+      },
+    } as never)
+    .mockResolvedValueOnce({
+      data: {
+        items: [{ id: 'task-a', task_type: 'download_link', status: 'running', progress: { percent: 70 } }],
+        total: 1,
+      },
+    } as never)
+
+  const firstLoad = store.loadTasks()
+  await vi.waitFor(() => expect(tasksApi.getLogs).toHaveBeenCalledTimes(1))
+
+  await store.loadTasks()
+  expect(store.currentMetrics.percent).toBe(70)
+
+  resolveLogs1({ data: { logs: [], has_more: false, last_seq: 0 } })
+  await firstLoad
+  expect(store.currentMetrics.percent).toBe(70)
+})

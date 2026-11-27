@@ -2,7 +2,7 @@ import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 import { ref } from 'vue'
 import { createPinia, setActivePinia } from 'pinia'
 import { createTaskRealtime } from '../taskRealtime'
-import { botsApi, tasksApi, telegramAuthApi } from '@/api'
+import { botsApi, tasksApi, telegramAuthApi, authApi } from '@/api'
 import { useTelegramAuthStore } from '../telegramAuthStore'
 import { useAccountStore } from '../accountStore'
 
@@ -366,5 +366,81 @@ describe('taskRealtime 日志流竞态', () => {
     expect(handle.currentLogs.value.some((l) => l.seq === 2700)).toBe(true)
     expect(handle.currentLogs.value.some((l) => l.seq === 701)).toBe(true)
     expect(handle.currentLogs.value.some((l) => l.seq === 700)).toBe(false)
+  })
+
+  it('prevents buffered progress frames from reverting a newer task_update status', async () => {
+    const { handle, ctx } = makeHandle([{ id: 't-1', status: 'running', progress: {} } as never])
+    handle.startPolling()
+    await vi.advanceTimersByTimeAsync(0)
+    await handle.initWebSocket()
+    const socket = FakeWebSocket.instances.at(-1)!
+
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: 'progress',
+        task_id: 't-1',
+        status: 'running',
+        progress: { processed_bytes: 500, total_bytes: 1000, speed_mb_s: 5 },
+      }),
+    } as MessageEvent)
+
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: 'task_update',
+        task_id: 't-1',
+        status: 'completed',
+      }),
+    } as MessageEvent)
+
+    expect((ctx.tasks.value[0] as { status: string }).status).toBe('completed')
+
+    await vi.advanceTimersByTimeAsync(100)
+    expect((ctx.tasks.value[0] as { status: string }).status).toBe('completed')
+    handle.stopPolling()
+  })
+
+  it('invalidates in-flight fetchTaskLogs when resetLogStream clears selection', async () => {
+    const { handle } = makeHandle([])
+    let releaseLogs!: (v: unknown) => void
+    mockedGetLogs.mockImplementationOnce(
+      () =>
+        new Promise((r) => {
+          releaseLogs = r
+        }) as never,
+    )
+
+    const pending = handle.fetchTaskLogs('task-stale', { reset: true })
+    handle.resetLogStream()
+    releaseLogs({ data: { task_id: 'task-stale', logs: [wsLog(1, 'stale line')], has_more: false, last_seq: 1 } })
+    await pending
+
+    expect(handle.currentLogs.value).toEqual([])
+  })
+
+  it('retries WebSocket after transient ticket failure and stops on 401 rejection', async () => {
+    const { handle } = makeHandle([])
+    const issueMock = vi.mocked(authApi.issueMediaTicket)
+    issueMock
+      .mockRejectedValueOnce(new Error('503 temporary outage'))
+      .mockResolvedValueOnce({ data: { ticket: 'recovered-ticket' } } as never)
+
+    handle.startPolling()
+    await vi.advanceTimersByTimeAsync(0)
+    await handle.initWebSocket()
+    expect(FakeWebSocket.instances).toHaveLength(0)
+
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(issueMock).toHaveBeenCalledTimes(2)
+    expect(FakeWebSocket.instances).toHaveLength(1)
+    handle.stopPolling()
+
+    issueMock.mockReset()
+    issueMock.mockRejectedValueOnce({ response: { status: 401 } })
+    handle.startPolling()
+    await vi.advanceTimersByTimeAsync(0)
+    await handle.initWebSocket()
+    await vi.advanceTimersByTimeAsync(60000)
+    expect(issueMock).toHaveBeenCalledTimes(1)
+    handle.stopPolling()
   })
 })

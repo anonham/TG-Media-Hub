@@ -27,6 +27,7 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   const apiKey = ref<string>(initialKey)
+  const isKeyVerified = ref<boolean>(false)
   const isAuthRequired = ref<boolean>(false)
   const isAuthChecked = ref<boolean>(false)
   const isModalVisible = ref<boolean>(false)
@@ -55,53 +56,64 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   async function checkAuthStatus(): Promise<boolean> {
+    const tgAuthStore = useTelegramAuthStore()
+    const read = tgAuthStore.captureAdmissionRead()
     try {
-      const tgAuthStore = useTelegramAuthStore()
-      const read = tgAuthStore.captureAdmissionRead()
       const res = await authApi.getStatus()
+      if (!tgAuthStore.isAdmissionReadCurrent(read)) return false
       tgAuthStore.syncAdmissionStatus(res.data, read)
       isAuthRequired.value = Boolean(res.data?.auth_required)
 
       if (res.data?.restricted) {
+        isKeyVerified.value = false
         isModalVisible.value = false
         isAuthChecked.value = false
         return false
       }
 
       if (!isAuthRequired.value) {
+        isKeyVerified.value = false
         isModalVisible.value = false
         isAuthChecked.value = true
         return true
       }
 
       if (apiKey.value) {
-        const verifyRes = await verifyKey(apiKey.value)
+        const verifyOutcome = await verifyKey(apiKey.value)
+        if (!tgAuthStore.isAdmissionReadCurrent(read)) return false
         isAuthChecked.value = true
-        if (verifyRes) {
+        if (verifyOutcome === 'valid') {
+          isKeyVerified.value = true
           isModalVisible.value = false
           return true
         } else {
-          openAuthModal('保存的 API Key 已失效，请重新验证')
+          isKeyVerified.value = false
+          openAuthModal(
+            verifyOutcome === 'invalid' ? '保存的 API Key 已失效，请重新验证' : '鉴权服务暂时不可达，请稍后重试',
+          )
           return false
         }
       } else {
+        isKeyVerified.value = false
         isAuthChecked.value = true
         openAuthModal('服务已开启身份验证，请输入 API Key 进入控制台')
         return false
       }
     } catch (err) {
+      if (!tgAuthStore.isAdmissionReadCurrent(read)) return false
       console.error('检查鉴权状态失败:', err)
       isAuthChecked.value = true
       return false
     }
   }
 
-  async function verifyKey(key: string): Promise<boolean> {
+  async function verifyKey(key: string): Promise<'valid' | 'invalid' | 'error'> {
     try {
       const res = await authApi.verify(key)
-      return res.status === 200
-    } catch {
-      return false
+      return res.status === 200 ? 'valid' : 'invalid'
+    } catch (err: unknown) {
+      const status = (err as { response?: { status?: number } } | null)?.response?.status
+      return status === 401 || status === 403 ? 'invalid' : 'error'
     }
   }
 
@@ -113,9 +125,10 @@ export const useAuthStore = defineStore('auth', () => {
       return false
     }
 
-    const success = await verifyKey(cleanKey)
-    if (success) {
+    const outcome = await verifyKey(cleanKey)
+    if (outcome === 'valid') {
       apiKey.value = cleanKey
+      isKeyVerified.value = true
       rememberMe.value = remember
 
       if (remember) {
@@ -136,7 +149,7 @@ export const useAuthStore = defineStore('auth', () => {
       isModalVisible.value = false
       message.success('API Key 身份验证成功！')
       return true
-    } else {
+    } else if (outcome === 'invalid') {
       failedAttempts.value++
       if (failedAttempts.value >= 3) {
         startLockdown()
@@ -144,11 +157,15 @@ export const useAuthStore = defineStore('auth', () => {
         message.error(`API Key 验证失败 (${failedAttempts.value}/3)`)
       }
       return false
+    } else {
+      message.error('无法连接鉴权服务，请检查网络或服务状态后重试')
+      return false
     }
   }
 
   function clearAuthKey(): void {
     apiKey.value = ''
+    isKeyVerified.value = false
     rememberMe.value = false
     localStorage.removeItem('tg_hub_api_key_remember')
     sessionStorage.removeItem('tg_hub_api_key_session')
@@ -171,6 +188,7 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   function handle401Error(): void {
+    isKeyVerified.value = false
     if (isModalVisible.value) return // 已有弹窗打开则不再叠加
     if (isAuthRequired.value) {
       openAuthModal('访问口令失效或未经授权，请重新输入')
@@ -180,6 +198,7 @@ export const useAuthStore = defineStore('auth', () => {
 
   return {
     apiKey,
+    isKeyVerified,
     isAuthRequired,
     isAuthChecked,
     isModalVisible,

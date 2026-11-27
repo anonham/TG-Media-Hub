@@ -63,21 +63,29 @@ export const useForwardStore = defineStore('forward', () => {
   const receiptLoading = ref<boolean>(false)
   const receiptError = ref<string | null>(null)
 
+  function clearGaps(): void {
+    gapsSeq.next()
+    gapsLoading.value = false
+    gaps.value = []
+    gapsError.value = null
+  }
+
+  function clearEstimate(): void {
+    estimateSeq.next()
+    estimateLoading.value = false
+    estimate.value = null
+    estimateError.value = null
+  }
+
   function clearCoverage(): void {
     // 推进三条序列使在途响应失效 (isCurrent 不再成立), 并复位 loading 旗 ——
     // 否则清除期间到达的 pending 响应会通过序号检查复活已清数据
     coverageSeq.next()
-    gapsSeq.next()
-    estimateSeq.next()
     coverageLoading.value = false
-    gapsLoading.value = false
-    estimateLoading.value = false
     coverage.value = null
     coverageError.value = null
-    gaps.value = []
-    gapsError.value = null
-    estimate.value = null
-    estimateError.value = null
+    clearGaps()
+    clearEstimate()
   }
 
   async function loadCoverage(
@@ -269,6 +277,8 @@ export const useForwardStore = defineStore('forward', () => {
     receiptLoading,
     receiptError,
     clearCoverage,
+    clearGaps,
+    clearEstimate,
     loadCoverage,
     loadGaps,
     fetchEstimate,

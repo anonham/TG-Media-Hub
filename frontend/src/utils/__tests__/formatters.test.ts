@@ -57,6 +57,13 @@ describe('formatters', () => {
       expect(formatBytes(1024 * 1536, 1)).toBe('1.5 MB')
       expect(formatBytes(1024 * 1536, 0)).toBe('2 MB')
     })
+
+    it('clamps out-of-range sub-byte and petabyte magnitudes within available units', () => {
+      expect(formatBytes(0.5)).toBe('0.5 B')
+      expect(formatBytes(1024 ** 5)).toBe('1024 TB')
+      expect(formatBytes(-5)).toBe('0 B')
+      expect(formatBytes(Number.NaN)).toBe('0 B')
+    })
   })
 
   describe('formatSeconds', () => {

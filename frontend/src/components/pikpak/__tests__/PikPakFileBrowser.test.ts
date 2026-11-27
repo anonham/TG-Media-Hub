@@ -47,3 +47,79 @@ it('refetches an invalidated active folder and reuses navigation and refresh req
     wrapper.unmount()
   }
 })
+
+it('skips pruning on multi-page refresh and reconciles the refreshed folder after navigation', async () => {
+  const store = usePikpakStore()
+  store.authStatus = { logged_in: true } as never
+  vi.mocked(pikpakApi.fileList).mockResolvedValueOnce({ data: { items: [], next_page_token: null } } as never)
+
+  const wrapper = shallowMount(PikPakFileBrowser)
+  try {
+    await flushPromises()
+    const vm = wrapper.vm as unknown as {
+      enterFolder: (item: PikPakFileItem) => Promise<void>
+      navigateTo: (idx: number) => Promise<void>
+      refreshCurrent: () => Promise<void>
+    }
+
+    const folderA: PikPakFileItem = { file_id: 'folder-a', name: 'Folder A', is_dir: true, size_bytes: 0 }
+    const page1File: PikPakFileItem = {
+      file_id: 'f-p1',
+      name: 'p1.mp4',
+      is_dir: false,
+      size_bytes: 10,
+      parent_id: 'folder-a',
+    }
+    const page2File: PikPakFileItem = {
+      file_id: 'f-p2',
+      name: 'p2.mp4',
+      is_dir: false,
+      size_bytes: 20,
+      parent_id: 'folder-a',
+    }
+    const rootFile: PikPakFileItem = {
+      file_id: 'f-root',
+      name: 'root.mp4',
+      is_dir: false,
+      size_bytes: 30,
+      parent_id: '',
+    }
+
+    vi.mocked(pikpakApi.fileList).mockResolvedValueOnce({
+      data: { items: [page1File], next_page_token: 'tok-2' },
+    } as never)
+    await vm.enterFolder(folderA)
+    store.toggleFile(page2File)
+    store.toggleFile(rootFile)
+
+    // Multi-page refresh: page 2 selection must NOT be pruned
+    vi.mocked(pikpakApi.fileList).mockResolvedValueOnce({
+      data: { items: [page1File], next_page_token: 'tok-2' },
+    } as never)
+    await vm.refreshCurrent()
+    expect(store.isSelected('f-p2')).toBe(true)
+
+    // Navigate to root while single-page refresh of folderA is still pending
+    let resolveFolderARefresh!: (v: unknown) => void
+    vi.mocked(pikpakApi.fileList).mockImplementationOnce(
+      () =>
+        new Promise((r) => {
+          resolveFolderARefresh = r
+        }) as never,
+    )
+    const refreshPromise = vm.refreshCurrent()
+
+    vi.mocked(pikpakApi.fileList).mockResolvedValueOnce({
+      data: { items: [rootFile], next_page_token: null },
+    } as never)
+    await vm.navigateTo(0)
+
+    // FolderA refresh completes with empty list; rootFile must stay selected while folderA selections prune
+    resolveFolderARefresh({ data: { items: [], next_page_token: null } })
+    await refreshPromise
+    expect(store.isSelected('f-root')).toBe(true)
+    expect(store.isSelected('f-p2')).toBe(false)
+  } finally {
+    wrapper.unmount()
+  }
+})

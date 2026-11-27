@@ -456,7 +456,7 @@ function showSubmitSuccessModal(taskId: string | number) {
 
 // 表单要素变化 → 防抖刷新覆盖条 / gap 下拉 / 提交前预估 (不再自动查映射历史)
 let coverageTimer: ReturnType<typeof setTimeout> | null = null
-watch([sourceChat, selectedTarget, startId, endId, batchSize], () => {
+watch([sourceChat, selectedTarget, startId, endId, batchSize], (_newVals, oldVals) => {
   if (coverageTimer) {
     clearTimeout(coverageTimer)
     coverageTimer = null
@@ -466,6 +466,9 @@ watch([sourceChat, selectedTarget, startId, endId, batchSize], () => {
     forwardStore.clearCoverage()
     return
   }
+  if (oldVals && (oldVals[0]?.trim() !== src || oldVals[1] !== selectedTarget.value)) {
+    forwardStore.clearCoverage()
+  }
   coverageTimer = setTimeout(() => {
     const minId = startId.value || inspectResult.value?.min_id || null
     const maxId = endId.value || inspectResult.value?.max_id || null
@@ -473,12 +476,12 @@ watch([sourceChat, selectedTarget, startId, endId, batchSize], () => {
     if (minId && maxId) {
       forwardStore.loadGaps(src, selectedTarget.value!, minId, maxId)
     } else {
-      forwardStore.clearCoverage()
+      forwardStore.clearGaps()
     }
     if (startId.value && endId.value) {
       forwardStore.fetchEstimate(src, selectedTarget.value!, startId.value, endId.value, batchSize.value ?? 50)
     } else {
-      forwardStore.clearCoverage()
+      forwardStore.clearEstimate()
     }
   }, 600)
 })

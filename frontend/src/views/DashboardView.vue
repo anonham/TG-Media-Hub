@@ -26,7 +26,7 @@
           <span class="metric-icon-badge speed-icon">⚡</span>
         </div>
         <div class="metric-main-value font-mono">
-          {{ taskStore.currentMetrics.speed.toFixed(2) }} <span class="unit">MB/s</span>
+          {{ taskStore.totalRunningSpeed.toFixed(2) }} <span class="unit">MB/s</span>
         </div>
         <div class="metric-sub-detail">
           <span v-if="taskStore.currentMetrics.eta > 0">

@@ -93,4 +93,34 @@ describe('PikPakAuthCard timer lifecycle regressions', () => {
 
     wrapper.unmount()
   })
+
+  it('refuses to render non-https verificationUri as a clickable anchor', async () => {
+    const store = usePikpakStore()
+    vi.spyOn(store, 'fetchAuthStatus').mockResolvedValue({ logged_in: false, state: 'not_bound' } as never)
+    store.deviceFlow = {
+      phase: 'polling',
+      deviceCode: 'dc',
+      userCode: 'UC',
+      verificationUri: 'javascript:alert(1)',
+      interval: 5,
+      expiresAt: 0,
+      lastStatus: '',
+      errorMsg: '',
+    }
+
+    const wrapper = shallowMount(PikPakAuthCard, {
+      global: {
+        stubs: {
+          NModal: { template: '<div><slot /></div>' },
+          NButton: { template: '<button><slot /></button>' },
+          NAlert: { template: '<div><slot /></div>' },
+          NTag: { template: '<span><slot /></span>' },
+          NSpin: { template: '<span />' },
+        },
+      },
+    })
+    await flushPromises()
+    expect(wrapper.find('a[href]').exists()).toBe(false)
+    wrapper.unmount()
+  })
 })

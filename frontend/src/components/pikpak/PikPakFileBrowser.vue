@@ -294,8 +294,8 @@ async function navigateTo(idx: number) {
   await pikpakStore.fetchFolder(currentFolderId.value)
 }
 
-function preserveValidSelections(freshItems: PikPakFileItem[] = []) {
-  const prunedCount = pikpakStore.pruneSelectionForFolder(currentFolderId.value, freshItems)
+function preserveValidSelections(folderId: string, freshItems: PikPakFileItem[] = []) {
+  const prunedCount = pikpakStore.pruneSelectionForFolder(folderId, freshItems)
   if (prunedCount > 0) {
     message.info(`已自动移除 ${prunedCount} 个远端已不存在的勾选文件`)
   }
@@ -306,13 +306,16 @@ async function refreshCurrent() {
   // 包2 (J6) + 包6 (K5): 刷新语义 = 全量失效 (其余目录将在进入时按 TTL 重新拉取),
   // 但保留当前目录旧条目作 loading 占位 —— 手动刷新瞬间列表不闪空, 新数据到达后
   // 原位更新。所选清单快照 (规则层持有 leaves) 与 phase3 §9-1 "所见即所发"契约
-  // 不受影响, preserveValidSelections 清洗保留。
-  pikpakStore.clearCache(currentFolderId.value)
-  const res = await pikpakStore.fetchFolder(currentFolderId.value, { force: true })
+  // 不受影响, 仅在单页完整返回时执行 preserveValidSelections 清洗。
+  const targetFolderId = currentFolderId.value
+  const targetName = breadcrumbStack.value[breadcrumbStack.value.length - 1]?.name || '根目录'
+  pikpakStore.clearCache(targetFolderId)
+  const res = await pikpakStore.fetchFolder(targetFolderId, { force: true })
   if (res) {
-    const currentName = breadcrumbStack.value[breadcrumbStack.value.length - 1]?.name || '根目录'
-    message.success(`已刷新 ${currentName}，其余目录将在进入时重新拉取`)
-    preserveValidSelections(res.items || [])
+    message.success(`已刷新 ${targetName}，其余目录将在进入时重新拉取`)
+    if (!res.nextPageToken) {
+      preserveValidSelections(targetFolderId, res.items || [])
+    }
   }
 }
 

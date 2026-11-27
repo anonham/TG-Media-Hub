@@ -151,8 +151,8 @@
 <script setup lang="ts">
 // 任务详情抽屉主文件: 抽屉壳 + 头部任务操作 + 并发调节写入单点;
 // 四个 Tab 展示与数据内聚于 drawer/ 三子组件与 console/TaskLogTerminal。
-import { ref, computed, watch } from 'vue'
-import { NDrawer, NDrawerContent, NTabs, NTabPane, NTag, NButton, NSpin, NEmpty } from 'naive-ui'
+import { ref, computed, watch, h } from 'vue'
+import { NDrawer, NDrawerContent, NTabs, NTabPane, NTag, NButton, NSpin, NEmpty, NCheckbox } from 'naive-ui'
 import { useTaskStore } from '@/stores/taskStore'
 import { dialog } from '@/utils/discreteApi'
 import { copyTextToClipboard } from '@/utils/clipboard'
@@ -390,13 +390,30 @@ function handleDelete() {
   if (!task.value) return
   const targetId = task.value.id
   const isDownload = String(task.value.task_type || '').startsWith('download')
+  const deleteFilesRef = ref(false)
   dialog.warning({
     title: '删除任务记录',
-    content: `确定物理删除任务 #${targetId} 吗？操作不可恢复。`,
+    content: () =>
+      h('div', { style: 'display:flex;flex-direction:column;gap:10px;margin-top:4px' }, [
+        h('span', `确定物理删除任务 #${targetId} 吗？操作不可恢复。`),
+        isDownload
+          ? h(
+              NCheckbox,
+              {
+                size: 'small',
+                checked: deleteFilesRef.value,
+                'onUpdate:checked': (v: boolean) => {
+                  deleteFilesRef.value = v
+                },
+              },
+              { default: () => '同时删除关联的断点文件 (.part/.meta)' },
+            )
+          : null,
+      ]),
     positiveText: '确认删除',
     negativeText: '放弃',
     onPositiveClick: () => {
-      taskStore.deleteTask(targetId, isDownload)
+      taskStore.deleteTask(targetId, isDownload && deleteFilesRef.value)
       handleUpdateShow(false)
     },
   })

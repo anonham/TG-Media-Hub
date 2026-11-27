@@ -58,17 +58,28 @@ describe('telegramAuthStore Unit Tests', () => {
       expect(parsed.expires).toBeGreaterThan(Date.now())
     })
 
-    it('get2FAToken invalidates token when expired', () => {
+    it('get2FAToken invalidates in-memory state on expired entry without deleting storage', () => {
       const expiredTime = Date.now() - 5000
-      localStorage.setItem(
-        'tg_hub_2fa_unlocked',
-        JSON.stringify({ unlocked: true, token: 'expired-token', expires: expiredTime }),
-      )
+      const expiredPayload = JSON.stringify({ unlocked: true, token: 'expired-token', expires: expiredTime })
+      localStorage.setItem('tg_hub_2fa_unlocked', expiredPayload)
 
       const store = useTelegramAuthStore()
       expect(store.get2FAToken()).toBe('')
       expect(store.isWeb2FAUnlocked).toBe(false)
-      expect(localStorage.getItem('tg_hub_2fa_unlocked')).toBeNull()
+      expect(localStorage.getItem('tg_hub_2fa_unlocked')).toBe(expiredPayload)
+    })
+
+    it('passive read does not wipe a valid replacement credential written concurrently', () => {
+      const expiredPayload = JSON.stringify({ unlocked: true, token: 'old', expires: Date.now() - 5000 })
+      const replacementPayload = JSON.stringify({ unlocked: true, token: 'fresh', expires: Date.now() + 60000 })
+      const store = useTelegramAuthStore()
+      vi.spyOn(localStorage, 'getItem').mockImplementationOnce(() => {
+        localStorage.setItem('tg_hub_2fa_unlocked', replacementPayload)
+        return expiredPayload
+      })
+
+      expect(store.get2FAToken()).toBe('')
+      expect(localStorage.getItem('tg_hub_2fa_unlocked')).toBe(replacementPayload)
     })
 
     it('clear2FAStorage clears token and local storage', () => {

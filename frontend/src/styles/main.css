@@ -1,0 +1,568 @@
+:root {
+  /* 现代 Web 标准: 颜色方案、原生强调色与标准纤细滚动条 */
+  /* 亮色为基准色方案 —— 'light dark' 会让 OS 暗色偏好下原生控件/滚动条
+     与亮色应用配色不一致 (且覆盖 applyThemeToDom 的 meta 提示); 暗色由 [data-theme] 覆盖 */
+  color-scheme: light;
+  accent-color: #2563eb;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.45) transparent;
+
+  /* 基础画布与背景 (默认对齐 Cockpit Tools 浅色微灰微蓝规范) */
+  --bg-primary: #f4f6fb;
+  --bg-sidebar: #ffffff;
+  --bg-header: rgba(255, 255, 255, 0.88);
+  --bg-card: #ffffff;
+  --bg-card-hover: #f8fafc;
+  --bg-pill-active: #eff6ff;
+  --bg-pill-inactive: #f1f5f9;
+  --bg-input: #f8fafc;
+
+  /* 核心强调色与状态色 (浅色基准按 WCAG AA >= 4.5:1 收口, 兼容 15% 提示底色) */
+  --accent-color: #2563eb;
+  --accent-hover: #3b82f6;
+  --accent-light: #eff6ff;
+  --accent-gradient: linear-gradient(135deg, #2563eb 0%, #3b82f6 50%, #60a5fa 100%);
+  --info-color: #0369a1;
+  --success-color: #047857;
+  --warning-color: #92400e;
+  --danger-color: #b91c1c;
+  --indigo-color: #4f46e5;
+  --pink-color: #be185d;
+  --purple-color: #7e22ce;
+
+  /* 文字层级 */
+  --text-primary: #0f172a;
+  --text-secondary: #64748b;
+  --text-muted: #94a3b8;
+
+  /* 边框与投影规范 (大圆角、微边框、柔和弥散阴影) */
+  --border-color: rgba(0, 0, 0, 0.06);
+  --border-color-focus: rgba(37, 99, 235, 0.4);
+  --card-radius: 16px;
+  --card-shadow: 0 2px 10px -2px rgba(15, 23, 42, 0.04), 0 1px 3px rgba(15, 23, 42, 0.02);
+  --card-shadow-hover: 0 8px 20px -4px rgba(15, 23, 42, 0.08);
+
+  /* 表格交互状态变量 */
+  --table-row-hover: #f8fafc;
+  --table-row-selected: #eff6ff;
+  --table-row-active: rgba(37, 99, 235, 0.12);
+
+  /* 尺寸与安全区规范 (适配打孔屏及手势导航栏) */
+  --sidebar-width: 240px;
+  --sidebar-collapsed-width: 68px;
+  --header-height: 60px;
+  --safe-area-top: env(safe-area-inset-top, 0px);
+  --safe-area-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-area-left: env(safe-area-inset-left, 0px);
+  --safe-area-right: env(safe-area-inset-right, 0px);
+}
+
+/* 深色模式适配 */
+[data-theme='dark'] {
+  color-scheme: dark;
+  scrollbar-color: rgba(148, 163, 184, 0.3) transparent;
+
+  --bg-primary: #0b1120;
+  --bg-sidebar: #0f172a;
+  --bg-header: rgba(15, 23, 42, 0.88);
+  --bg-card: #1e293b;
+  --bg-card-hover: #334155;
+  --bg-pill-active: rgba(59, 130, 246, 0.2);
+  --bg-pill-inactive: rgba(255, 255, 255, 0.06);
+  --bg-input: rgba(15, 23, 42, 0.6);
+
+  --accent-color: #3b82f6;
+  --accent-hover: #60a5fa;
+  --accent-light: rgba(59, 130, 246, 0.15);
+  --accent-gradient: linear-gradient(135deg, #3b82f6 0%, #6366f1 50%, #a855f7 100%);
+  --info-color: #7dd3fc;
+  --success-color: #6ee7b7;
+  --warning-color: #fbbf24;
+  --danger-color: #fca5a5;
+  --indigo-color: #a5b4fc;
+  --pink-color: #f9a8d4;
+  --purple-color: #d8b4fe;
+
+  --text-primary: #f8fafc;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+
+  --border-color: rgba(255, 255, 255, 0.08);
+  --border-color-focus: rgba(59, 130, 246, 0.5);
+  --table-row-hover: #334155;
+  --table-row-selected: rgba(59, 130, 246, 0.18);
+  --table-row-active: rgba(59, 130, 246, 0.25);
+  --card-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  --card-shadow-hover: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+/* 高对比度 / Forced Colors Mode 系统色回退 */
+@media (forced-colors: active) {
+  :root,
+  [data-theme='dark'] {
+    --accent-color: LinkText;
+    --info-color: CanvasText;
+    --success-color: CanvasText;
+    --warning-color: CanvasText;
+    --danger-color: CanvasText;
+    --indigo-color: CanvasText;
+    --pink-color: CanvasText;
+    --purple-color: CanvasText;
+    --border-color: ButtonBorder;
+    --border-color-focus: Highlight;
+  }
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  min-height: 100vh;
+  min-height: 100dvh;
+  overflow-x: hidden;
+  transition:
+    background-color 0.25s ease,
+    color 0.25s ease;
+}
+
+.font-mono {
+  font-family: 'JetBrains Mono', 'Cascadia Code', Consolas, monospace;
+}
+
+/* 现代圆角卡片基础类 (同时兼容历史 glass-card 类，使其即刻呈现现代明亮质感) */
+.glass-card,
+.cockpit-card {
+  background: var(--bg-card) !important;
+  border: 1px solid var(--border-color) !important;
+  border-radius: var(--card-radius) !important;
+  box-shadow: var(--card-shadow) !important;
+  transition: all 0.2s ease;
+}
+
+.card {
+  padding: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.cockpit-card:hover {
+  box-shadow: var(--card-shadow-hover);
+}
+
+/* 标题左侧垂直蓝色小短条指示器 (▌) */
+.section-indicator {
+  display: inline-flex;
+  align-items: center;
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 0.85rem;
+  user-select: none;
+}
+
+.section-title {
+  display: flex;
+  align-items: center;
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.section-indicator::before,
+.section-title::before {
+  content: '';
+  display: inline-block;
+  width: 4px;
+  height: 16px;
+  background: var(--accent-color);
+  border-radius: 2px;
+  margin-right: 8px;
+}
+
+/* 标题与短文本断行优化 (W3C text-wrap: balance) */
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+.section-title,
+.section-indicator,
+.cockpit-table th {
+  text-wrap: balance;
+}
+
+/* 段落与描述文本孤字消除 (W3C text-wrap: pretty) */
+p,
+.setting-row-desc {
+  text-wrap: pretty;
+}
+
+/* 标准数据表格公共类 (.cockpit-table) */
+.table-responsive-wrapper {
+  overflow: auto;
+  max-inline-size: 100%;
+  max-block-size: min(720px, calc(100vh - 280px));
+  container-type: inline-size;
+}
+
+.table-responsive-wrapper:focus-visible {
+  outline: 2px solid var(--accent-color);
+  outline-offset: -2px;
+}
+
+.cockpit-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  text-align: left;
+  font-size: 0.85rem;
+}
+
+.table-responsive-wrapper thead th,
+.cockpit-table thead th {
+  position: sticky;
+  inset-block-start: 0;
+  z-index: 2;
+  background: var(--bg-card-hover);
+  color: var(--text-secondary);
+  font-weight: 600;
+  padding: 0.65rem 0.8rem;
+  border-bottom: 1px solid var(--border-color);
+  white-space: nowrap;
+}
+
+.cockpit-table td {
+  padding: 0.7rem 0.8rem;
+  border-bottom: 1px solid var(--border-color);
+  color: var(--text-primary);
+  vertical-align: middle;
+}
+
+/* 关联任务跳转徽标公共类 (.task-link-badge); span→a 语义化后需抵消锚点 UA 下划线 */
+.task-link-badge {
+  color: var(--accent-color);
+  background: var(--bg-card-hover);
+  border: 1px solid var(--border-color);
+  padding: 0.15rem 0.4rem;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.2s;
+  font-weight: 600;
+  display: inline-block;
+  text-decoration: none;
+}
+
+.task-link-badge:hover {
+  background: var(--accent-light);
+  border-color: var(--accent-color);
+  text-decoration: underline;
+}
+
+/* 顶部悬浮胶囊分段 Tab 容器 */
+.segmented-pill-container {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--bg-card);
+  padding: 4px 6px;
+  border-radius: 9999px;
+  border: 1px solid var(--border-color);
+  box-shadow: var(--card-shadow);
+}
+
+.segmented-pill-item {
+  padding: 6px 18px;
+  border-radius: 9999px;
+  font-size: 0.88rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border: none;
+  background: transparent;
+  transition: all 0.18s ease;
+  user-select: none;
+}
+
+.segmented-pill-item:hover {
+  color: var(--text-primary);
+}
+
+.segmented-pill-item.active {
+  background: var(--accent-light);
+  color: var(--accent-color);
+  font-weight: 600;
+}
+
+/* 行式设置项规范 */
+.setting-row-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 1.25rem;
+  gap: 1.5rem;
+}
+
+.setting-row-item:not(:last-child) {
+  border-bottom: 1px solid var(--border-color);
+}
+
+.setting-row-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  flex: 1;
+}
+
+.setting-row-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.setting-row-desc {
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+  line-height: 1.4;
+  margin: 0;
+}
+
+/* 页面切换动画 */
+.fade-transform-leave-active,
+.fade-transform-enter-active {
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.fade-transform-enter-from {
+  opacity: 0;
+  transform: translateY(6px);
+}
+
+.fade-transform-leave-to {
+  opacity: 0;
+  transform: translateY(-6px);
+}
+
+/* 自定义纤细滚动条 (仅针对不支持标准 scrollbar-color 的旧版 WebKit 浏览器回退) */
+@supports not (scrollbar-color: auto) {
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(148, 163, 184, 0.35);
+    border-radius: 4px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(148, 163, 184, 0.6);
+  }
+}
+
+/* ============================================================
+   UI-001: 运行态状态徽标与进度条翠绿色动态呼吸光晕动效
+   ============================================================ */
+
+/* 翠绿微光呼吸动画 */
+@keyframes emerald-glow-pulse {
+  0% {
+    box-shadow: 0 0 4px rgba(16, 185, 129, 0.4);
+    border-color: rgba(16, 185, 129, 0.6);
+  }
+  50% {
+    box-shadow:
+      0 0 12px rgba(16, 185, 129, 0.8),
+      0 0 20px rgba(16, 185, 129, 0.35);
+    border-color: rgba(16, 185, 129, 0.95);
+  }
+  100% {
+    box-shadow: 0 0 4px rgba(16, 185, 129, 0.4);
+    border-color: rgba(16, 185, 129, 0.6);
+  }
+}
+
+.status-tag-running {
+  box-shadow: 0 0 10px rgba(16, 185, 129, 0.45) !important;
+  animation: emerald-glow-pulse 2s infinite ease-in-out !important;
+  border: 1px solid rgba(16, 185, 129, 0.6) !important;
+}
+
+/* 运行态进度条翠绿动态渐变与流光扫描 */
+.running-progress-emerald .n-progress-graph-line-fill {
+  background: linear-gradient(90deg, #10b981 0%, #34d399 50%, #059669 100%) !important;
+  box-shadow: 0 0 8px rgba(16, 185, 129, 0.5) !important;
+  position: relative !important;
+  overflow: hidden !important;
+}
+
+.running-progress-emerald .n-progress-graph-line-fill::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent 0%, rgba(255, 255, 255, 0.45) 50%, transparent 100%);
+  animation: progress-shimmer 2s infinite cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@keyframes progress-shimmer {
+  0% {
+    transform: translateX(0);
+  }
+  100% {
+    transform: translateX(250%);
+  }
+}
+
+/* ============================================================
+   移动端全局响应式基础规范
+   ============================================================ */
+
+.responsive-control-xs {
+  width: 120px;
+}
+.responsive-control-sm {
+  width: 160px;
+}
+.responsive-control-md {
+  width: 220px;
+}
+.responsive-control-lg {
+  width: 300px;
+}
+
+@container main-viewport (max-width: 756px) {
+  .responsive-control-xs,
+  .responsive-control-sm,
+  .responsive-control-md,
+  .responsive-control-lg {
+    width: 100% !important;
+    max-width: 100% !important;
+  }
+
+  .grid-2col,
+  .grid-3col {
+    grid-template-columns: 1fr !important;
+    gap: 0.85rem !important;
+  }
+
+  .card {
+    padding: 1rem;
+    gap: 1rem;
+  }
+
+  .card-header-bar {
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 0.75rem !important;
+  }
+
+  .card-header-bar .action-btn-group {
+    flex-wrap: wrap;
+    width: 100%;
+  }
+
+  .segmented-pill-container {
+    max-width: 100%;
+    overflow-x: auto;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .segmented-pill-container::-webkit-scrollbar {
+    display: none;
+  }
+
+  .segmented-pill-item {
+    white-space: nowrap;
+    flex-shrink: 0;
+    padding: 6px 14px;
+  }
+
+  .n-radio-group.n-radio-group--button-group {
+    display: flex !important;
+    flex-wrap: wrap !important;
+    height: auto !important;
+    gap: 0.4rem;
+  }
+
+  .n-radio-group.n-radio-group--button-group .n-radio-group__splitor {
+    display: none !important;
+  }
+
+  .n-radio-group.n-radio-group--button-group .n-radio-button {
+    height: auto !important;
+    min-height: 32px;
+    line-height: 1.35;
+    padding-block: 4px;
+    border-radius: 6px !important;
+    border-left-width: 1px !important;
+  }
+
+  .n-radio-group.n-radio-group--button-group .n-radio-button .n-radio__label {
+    white-space: normal;
+  }
+
+  .setting-row-item {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.75rem;
+    padding: 0.9rem 1rem;
+  }
+
+  .setting-row-control,
+  .setting-row-action {
+    width: 100%;
+  }
+}
+
+@media (max-width: 768px) {
+  .font-mono {
+    overflow-wrap: anywhere;
+  }
+}
+
+/* 动效减弱开关与系统 prefers-reduced-motion 无障碍控制 (置于末尾以覆盖 .status-tag-running) */
+.reduce-motion,
+.reduce-motion *,
+.reduce-motion *::before,
+.reduce-motion *::after,
+.reduce-motion .status-tag-running {
+  animation: none !important;
+  transition-duration: 0.01ms !important;
+  scroll-behavior: auto !important;
+}
+
+.reduce-motion ::view-transition-group(*),
+.reduce-motion ::view-transition-old(*),
+.reduce-motion ::view-transition-new(*) {
+  animation: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after,
+  .status-tag-running {
+    animation: none !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation: none !important;
+  }
+}

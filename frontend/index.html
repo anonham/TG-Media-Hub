@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="color-scheme" content="light dark" />
+    <script>
+      (function () {
+        try {
+          var mode = localStorage.getItem('tg_hub_theme_mode') || 'system'
+          var prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
+          var isDark = mode === 'dark' || ((mode === 'system' || mode === 'auto') && prefersDark)
+          if (isDark) {
+            document.documentElement.setAttribute('data-theme', 'dark')
+          } else {
+            document.documentElement.removeAttribute('data-theme')
+          }
+          // 减弱动效偏好同样需要首帧前恢复, 避免 reduce-motion 用户首屏闪过过渡动画
+          if ((localStorage.getItem('tg_hub_reduce_motion') || '') === 'true') {
+            document.documentElement.classList.add('reduce-motion')
+          }
+          var meta = document.querySelector('meta[name="color-scheme"]')
+          if (meta) {
+            meta.content = mode === 'dark' || mode === 'light' ? mode : 'light dark'
+          }
+        } catch (e) {}
+      })()
+    </script>
+    <meta name="theme-color" content="#f4f6fb" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0b1120" media="(prefers-color-scheme: dark)" />
+    <link rel="manifest" href="/static/manifest.webmanifest" />
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>⚡</text></svg>">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="text-scale" content="scale" />
+    <meta name="description" content="Telegram 限制媒体下载与多通道频道发布系统 - 高性能自建媒体工作台" />
+    <title>Telegram 限制媒体下载与多通道频道发布系统</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -250,3 +250,20 @@ def test_account_update_missing_id_does_not_clear_default():
     still_default = AccountRepository.get_default()
     assert still_default is not None
     assert still_default["id"] == acc["id"]
+
+
+async def test_removed_account_never_dispatches_queued_task():
+    from unittest.mock import AsyncMock, patch
+
+    from app.core.client_manager import client_manager
+    from app.core.scheduler import TaskScheduler
+
+    acc = AccountRepository.create(account_name="bound", phone="", session_file="bound", api_id=1, api_hash="test")
+    TaskQueueRepository.create("bound-task", "download_link", {}, account_id=acc["id"])
+    AccountRepository.delete(acc["id"])
+    with patch.object(client_manager, "get_available_account", new_callable=AsyncMock) as choose_account:
+        await TaskScheduler()._schedule_next_tasks()
+    choose_account.assert_not_awaited()
+    row = TaskQueueRepository.get_by_id("bound-task")
+    assert row["status"] == "failed"
+    assert str(acc["id"]) in row["error_detail"]

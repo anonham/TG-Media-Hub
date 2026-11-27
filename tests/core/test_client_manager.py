@@ -204,13 +204,13 @@ def inspect_with_virtual_files(folder: str, virtual_files: dict) -> dict:
     """以虚拟文件清单 (文件名 → 字节数) 执行真实 inspect_folder，不落盘任何文件"""
 
     def fake_walk(root):
-        return [(root, [], list(virtual_files.keys()))]
+        return [(root, list(virtual_files))]
 
     def fake_getsize(path):
         return virtual_files[os.path.basename(path)]
 
     with (
-        patch.object(publisher_module.os, "walk", fake_walk),
+        patch.object(publisher_module, "walk_publish_files", fake_walk),
         patch.object(publisher_module.os.path, "getsize", fake_getsize),
     ):
         return PublisherService.inspect_folder(folder)
@@ -855,7 +855,7 @@ async def test_repeated_transient_bot_probes_keep_existing_connection():
         side_effect=[
             TimeoutError("first timeout"),
             TimeoutError("second timeout"),
-            SimpleNamespace(username="live_bot"),
+            SimpleNamespace(id=1, bot=True, username="live_bot"),
         ]
     )
     client.disconnect = AsyncMock()
@@ -915,7 +915,7 @@ async def test_bot_probe_replaces_client_already_marked_invalid():
         replacement.is_connected.return_value = True
 
     replacement.start = AsyncMock(side_effect=start)
-    replacement.get_me = AsyncMock(return_value=SimpleNamespace(username="restored_bot"))
+    replacement.get_me = AsyncMock(return_value=SimpleNamespace(id=1, bot=True, username="restored_bot"))
 
     with (
         patch.object(BotRepository, "update_status"),
@@ -953,7 +953,7 @@ async def test_failed_bot_connect_releases_client_and_manual_ping_recovers(monke
     failed_client.is_connected.return_value = False
     failed_client.disconnect = AsyncMock()
     recovered_client = MagicMock()
-    recovered_client.get_me = AsyncMock(return_value=SimpleNamespace(username="retry_bot"))
+    recovered_client.get_me = AsyncMock(return_value=SimpleNamespace(id=1, bot=True, username="retry_bot"))
     recovered_client.is_connected.return_value = True
 
     with (
@@ -1019,7 +1019,7 @@ async def test_removing_bot_during_get_me_waits_for_client_cleanup(monkeypatch):
     async def get_me():
         probing.set()
         await release.wait()
-        return SimpleNamespace(username="retiring_bot")
+        return SimpleNamespace(id=1, bot=True, username="retiring_bot")
 
     client = MagicMock()
     client.is_connected.return_value = True
@@ -1586,3 +1586,20 @@ async def test_connect_unbound_account_missing_phone_stays_unauthenticated(tmp_p
         mock_tg.disconnect.assert_awaited()
     finally:
         AccountRepository.delete(acc_id)
+
+
+@pytest.mark.parametrize(("bot_flag", "remote_id"), [(False, 1), (True, 2)])
+async def test_bot_session_identity_mismatch_disconnects(bot_flag, remote_id):
+    from app.core.client_manager import TelegramBotClient
+
+    bot = TelegramBotClient(1, "1:test", "isolated", 1, "hash")
+    tg = MagicMock()
+    tg.is_connected.return_value = True
+    tg.get_me = AsyncMock(return_value=SimpleNamespace(bot=bot_flag, id=remote_id))
+    tg.disconnect = AsyncMock()
+    bot.client = tg
+    with patch.object(BotRepository, "update_status") as update:
+        assert await bot.connect(probe=True)
+    update.assert_called_once_with(1, "invalid")
+    tg.disconnect.assert_awaited_once()
+    assert bot.client is None

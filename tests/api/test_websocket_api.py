@@ -216,3 +216,30 @@ async def test_duplicate_connect_cleans_up_previous():
     assert not second_task.done()
 
     connection_manager.disconnect(ws)
+
+
+@pytest.mark.parametrize(
+    ("origins", "allowed"),
+    [
+        ([], True),
+        (["http://localhost:8500"], True),
+        (["https://ui.example"], True),
+        (["null"], False),
+        (["https://other.example"], False),
+        (["https://ui.example", "https://other.example"], False),
+    ],
+)
+def test_keyless_websocket_browser_origin(monkeypatch, origins, allowed):
+    from httpx import Headers
+    from starlette.websockets import WebSocketDisconnect
+
+    monkeypatch.setattr(settings, "API_KEY", "")
+    monkeypatch.setattr(settings, "CORS_ORIGINS", ["http://localhost:8500", "https://ui.example", "*"])
+    headers = Headers([("origin", origin) for origin in origins])
+    if allowed:
+        with client.websocket_connect("/ws/progress", headers=headers):
+            pass
+    else:
+        with pytest.raises(WebSocketDisconnect) as exc, client.websocket_connect("/ws/progress", headers=headers):
+            pytest.fail("unexpectedly accepted")
+        assert exc.value.code == 1008

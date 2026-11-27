@@ -68,6 +68,7 @@ class _FakeTelegramClient:
             bot=False,
         )
         self._is_bot = False
+        self._bot_id = 990001
 
     def is_connected(self) -> bool:
         return self._connected
@@ -83,6 +84,9 @@ class _FakeTelegramClient:
         if bot_token:
             self._is_bot = True
             self._authorized = True
+            token_id = bot_token.partition(":")[0]
+            if token_id.isdigit():
+                self._bot_id = int(token_id)
         return self
 
     async def is_user_authorized(self) -> bool:
@@ -90,7 +94,7 @@ class _FakeTelegramClient:
 
     async def get_me(self):
         if self._is_bot:
-            return SimpleNamespace(id=990001, username="mock_helper_bot", bot=True, first_name="MockBot")
+            return SimpleNamespace(id=self._bot_id, username="mock_helper_bot", bot=True, first_name="MockBot")
         if not self._authorized:
             return None
         return self._me or self._otp_me

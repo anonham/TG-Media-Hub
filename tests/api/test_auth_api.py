@@ -842,3 +842,15 @@ def test_web_2fa_send_preserves_500_on_send_failure(monkeypatch):
     monkeypatch.setattr(client_manager, "send_web_2fa_code", AsyncMock(return_value=False))
     resp = client.post("/api/telegram/web-2fa/send", headers={"X-API-Key": "test_key_2fa"})
     assert resp.status_code == 500
+
+
+def test_startup_rejects_shared_console_keys(monkeypatch):
+    monkeypatch.setattr(settings, "API_ID", 100)
+    monkeypatch.setattr(settings, "API_HASH", "test-hash")
+    monkeypatch.setattr(settings, "BOT_TOKENS", ["1:example"])
+    monkeypatch.setattr(settings, "API_KEY", "test-first-factor")
+    monkeypatch.setattr(settings, "SECRET_KEY", settings.API_KEY)
+    with pytest.raises(RuntimeError, match="SECRET_KEY"):
+        settings.validate_required()
+    monkeypatch.setattr(settings, "SECRET_KEY", "")
+    settings.validate_required()

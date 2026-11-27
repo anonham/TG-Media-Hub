@@ -1539,3 +1539,32 @@ def test_flood_wait_translated_without_raw_rpc_leak(monkeypatch):
     assert body["error_code"] == "flood_wait"
     assert body["retry_after_seconds"] == 45
     assert acc.auth_state == "UNAUTHENTICATED"
+
+
+async def test_email_otp_uses_email_verification_field():
+    from telethon import functions, types
+
+    ch = SimpleNamespace(
+        state="code_sent", target_phone="+12025550100", _phone_code_hash="test", delivery_channel="email"
+    )
+    tg = AsyncMock()
+    user = types.User(id=100)
+    tg.return_value = types.auth.Authorization(user=user)
+    assert await telegram_login_service._execute_otp_sign_in(ch, MagicMock(), tg, "12345", None) is None
+    request = tg.await_args.args[0]
+    assert isinstance(request, functions.auth.SignInRequest)
+    assert request.phone_number == ch.target_phone and request.phone_code_hash == "test"
+    assert request.phone_code is None
+    assert isinstance(request.email_verification, types.EmailVerificationCode)
+    assert request.email_verification.code == "12345"
+    tg._on_login.assert_awaited_once_with(user)
+    tg.sign_in.assert_not_awaited()
+
+
+def test_commit_verified_login_refuses_to_replace_bound_identity():
+    acc = AccountRepository.create(account_name="bound", phone="", session_file="bound", api_id=1, api_hash="test")
+    fields = dict(username=None, first_name="Test", dc_id=1, is_premium=False)
+    AccountRepository.commit_verified_login(acc["id"], user_id=11, **fields)
+    with pytest.raises(ValueError, match="身份"):
+        AccountRepository.commit_verified_login(acc["id"], expected_user_id=11, user_id=12, **fields)
+    assert AccountRepository.get_by_id(acc["id"])["user_id"] == 11

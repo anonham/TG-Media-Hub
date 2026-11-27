@@ -508,3 +508,11 @@ def test_forward_api_duplicate_guard_rejects_same_username_after_canonical_pinni
         assert resp_num.status_code == 400
     finally:
         TaskQueueRepository.delete("paused_canon_1")
+
+
+@pytest.mark.parametrize(
+    ("page", "limit", "expected"), [(0, 1, 422), (1, -1, 422), (1, 501, 422), (1, 500, 200), (2**63, 1, 200)]
+)
+def test_forward_history_pagination_bounds(page, limit, expected):
+    response = client.get("/api/forward/history", params={"page": page, "limit": limit}, headers=auth_headers())
+    assert response.status_code == expected

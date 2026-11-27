@@ -3215,3 +3215,19 @@ async def test_download_incomplete_preserves_failing_client_and_clears_recovered
     assert err.last_exceptions[chunk] is aux_err
     assert "AuthKeyUnregisteredError" in err.last_errors[chunk]
     assert is_session_invalid_error(err) is True
+
+
+async def test_truncated_small_download_keeps_existing_output(tmp_path):
+    from app.core.fast_telethon import download_engine as de
+
+    target = tmp_path / "small.bin"
+    target.write_bytes(b"previous")
+
+    async def download(_location, *, file):
+        file.write(b"x")
+
+    client = SimpleNamespace(download_file=download)
+    with pytest.raises(de.DownloadIncompleteError):
+        await de._download_small_file_direct(client, None, object(), str(target), 2, None, None, expected_size=4)
+    assert target.read_bytes() == b"previous"
+    assert list(tmp_path.iterdir()) == [target]

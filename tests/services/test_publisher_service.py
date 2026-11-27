@@ -2054,3 +2054,15 @@ def test_inspect_folder_skips_unreadable_file_instead_of_aborting(tmp_path, monk
     assert media_names == {"ok1.mkv", "ok2.mkv"}, "不可读文件不得中止整目录巡检"
     assert data["unavailable_files_count"] == 1
     assert data["unavailable_files"][0]["file_name"] == "gone.mkv"
+
+
+def test_inspect_and_publish_prune_sensitive_descendants(tmp_path):
+    from app.core.pipeline.utils import scan_folder_grouped
+
+    private = tmp_path / "nested" / ".ssh"
+    private.mkdir(parents=True)
+    (private / "key.txt").write_bytes(b"private")
+    (private / "private.mp4").write_bytes(b"private")
+    (tmp_path / "ordinary.mp4").write_bytes(b"media")
+    assert PublisherService.inspect_folder(str(tmp_path))["total_scanned_files"] == 1
+    assert scan_folder_grouped(str(tmp_path)) == {str(tmp_path): [str(tmp_path / "ordinary.mp4")]}

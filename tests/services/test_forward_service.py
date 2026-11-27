@@ -1863,6 +1863,8 @@ async def test_forward_failover_reassign_passes_old_account_id(monkeypatch):
 def _mk_forward_state(task_id):
     return SimpleNamespace(
         task_id=task_id,
+        parsed_source=-1001,
+        parsed_target=-1002,
         skipped_dead_count=1,
         bad_isolated_count=0,
         forwarded_count=3,
@@ -2314,3 +2316,16 @@ async def test_canonical_ledger_shared_across_username_and_numeric_id():
     assert cov_data["source_chat"] == "-1009000000017"
     assert cov_data["target_chat"] == "-1009000000018"
     assert cov_data["covered"] == [{"start": 1, "end": 3}]
+
+
+async def test_forward_start_and_error_logs_hide_invites(monkeypatch):
+    from app.services import forward_service as service
+
+    state = service._ForwardRunState("invite-log", "+fakeSource", "-1234", 50, False, False)
+    append = AsyncMock()
+    monkeypatch.setattr(TaskQueueRepository, "append_log_async", append)
+    await service._log_forward_startup(state, 50, 0)
+    await service._log_task_event(state, "lookup https://t.me/joinchat/fakeTarget and +fakeSource")
+    messages = [call.args[1] for call in append.await_args_list]
+    assert any("-1234" in message for message in messages)
+    assert all("fakeSource" not in message and "fakeTarget" not in message for message in messages)

@@ -339,11 +339,11 @@ def _install_ping_mocks(mock_clients: dict, id1: int, id2: int, id3: int, clock:
 
     async def fake_get_me_1():
         clock.advance(0.020)
-        return MagicMock(id=1001, username="bot_1_user")
+        return MagicMock(id=1001, bot=True, username="bot_1_user")
 
     async def fake_get_me_2():
         clock.advance(0.040)
-        return MagicMock(id=1002, username="bot_2_user")
+        return MagicMock(id=1002, bot=True, username="bot_2_user")
 
     async def fake_get_me_3():
         clock.advance(0.010)
@@ -364,7 +364,7 @@ async def test_e2e_bot_pool_round_robin_and_ping_health(monkeypatch):
     created_ids = []
     for b_num, dc in [(1, 2), (2, 4), (3, 5)]:
         bot_record = BotRepository.create(
-            bot_token=f"token_e2e_{b_num}",
+            bot_token=f"{1000 + b_num}:test",
             bot_name=f"Bot_e2e_{b_num}",
             session_name=f"e2e_bot_pool_{b_num}",
             api_id=999999,

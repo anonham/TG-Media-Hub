@@ -132,11 +132,13 @@ async def _finalize_publish_result(task_id: str, res, target_channel: str, progr
 
     await _persist_publish_diagnostics(task_id, res, target_channel)
 
-    if not active_task_controls.get(task_id, {}).get("cancelled"):
+    ctrl = active_task_controls.get(task_id, {})
+    if not ctrl.get("cancelled") and not ctrl.get("paused"):
         # D3: 终态公式加 skipped 豁免 (对齐 pikpak 版) —— 纯超限跳过不再判 failed
         has_failures = bool(failed_files) or (total_count > 0 and (published_count + len(skipped_files)) < total_count)
         final_status = "failed" if has_failures else "completed"
-        TaskQueueRepository.update_status(task_id, final_status)
+        if not await TaskQueueRepository.update_status_async(task_id, final_status, from_statuses=("running",)):
+            return
         failed_details = getattr(res, "failed_details", []) or []
         if final_status == "failed":
             await _finalize_placeholder_slots(task_id)  # 占位槽 ❌ 终态化
@@ -182,7 +184,7 @@ async def _finalize_publish_result(task_id: str, res, target_channel: str, progr
             final_done_bytes = final_all_bytes if not has_failures else final_last_done
         else:
             final_done_bytes = final_last_done or (final_all_bytes if not has_failures else 0)
-        TaskQueueRepository.update_progress(
+        await TaskQueueRepository.update_progress_async(
             task_id, final_done_bytes, final_all_bytes, published_count, total_count, 0.0, 0.0, item_desc
         )
         await TaskQueueRepository.append_log_async(task_id, summary_log)
@@ -212,6 +214,27 @@ async def _finalize_publish_result(task_id: str, res, target_channel: str, progr
         await connection_manager.broadcast({"type": "task_update", "task_id": task_id, "status": final_status})
 
 
+async def _claim_and_mark_running(task_id: str) -> bool:
+    """调度窗口自检并原子置位 running；已被取消/暂停时跳过执行且不覆盖终态。"""
+    if not await asyncio.to_thread(try_claim_executor_entry, task_id):
+        await TaskQueueRepository.append_log_async(
+            task_id, "[执行器] 任务在调度窗口内已被用户取消/暂停，跳过执行且不覆盖终态"
+        )
+        return False
+    if (
+        not await TaskQueueRepository.update_status_async(
+            task_id, "running", from_statuses=("queued", "pending", "running")
+        )
+        and await asyncio.to_thread(TaskQueueRepository.get_status, task_id) is not None
+    ):
+        await TaskQueueRepository.append_log_async(
+            task_id, "[执行器] 任务在调度窗口内已被用户取消/暂停，跳过执行且不覆盖终态"
+        )
+        release_runner_controls(task_id)
+        return False
+    return True
+
+
 async def run_publish_folder_task(
     task_id: str,
     folder_path: str,
@@ -228,13 +251,8 @@ async def run_publish_folder_task(
     """publish_folder 任务执行入口 (策略 execute 唯一调用): 调度窗口自检 → running →
     配置回读 → PublisherService.publish_folder → 终态四分支 (completed/failed、
     paused、cancelled、session_invalid) + task_update 广播 + controls 清理。"""
-    # 调度窗口自检 (统一范式见 runtime.try_claim_executor_entry): 已被用户取消/暂停则直接退出
-    if not await asyncio.to_thread(try_claim_executor_entry, task_id):
-        await TaskQueueRepository.append_log_async(
-            task_id, "[执行器] 任务在调度窗口内已被用户取消/暂停，跳过执行且不覆盖终态"
-        )
+    if not await _claim_and_mark_running(task_id):
         return
-    TaskQueueRepository.update_status(task_id, "running")
     await TaskQueueRepository.append_log_async(task_id, f"开始发布文件夹 [{folder_path}] 到频道 [{target_channel}]...")
 
     # 条目协议进度回调 (共享工厂): SQLite 节流 + 速率粘滞; 字节走新鲜 kwarg 回退链
@@ -478,9 +496,11 @@ async def _resolve_pikpak_run_config(
 async def _fail_empty_pikpak_publish(task_id: str) -> None:
     """空任务护栏 (tristate 配套 UX 改造): 展开后 0 个可发布项 → fail-fast failed 终态,
     杜绝静默「成功 0/0」 (旧路径: publisher 返回 PublishFolderResult(0,0,[]) 被判 completed)。"""
-    TaskQueueRepository.update_status(task_id, "failed")
-    await TaskQueueRepository.append_log_async(task_id, "❌ 未选择任何可发布的远端文件 (空目录或全部被过滤), 任务终止")
-    await connection_manager.broadcast({"type": "task_update", "task_id": task_id, "status": "failed"})
+    if await TaskQueueRepository.update_status_async(task_id, "failed", from_statuses=("running",)):
+        await TaskQueueRepository.append_log_async(
+            task_id, "❌ 未选择任何可发布的远端文件 (空目录或全部被过滤), 任务终止"
+        )
+        await connection_manager.broadcast({"type": "task_update", "task_id": task_id, "status": "failed"})
     release_runner_controls(task_id)
 
 
@@ -509,13 +529,8 @@ async def run_publish_pikpak_task(
     """pikpak_publish 任务执行入口 (策略 execute 唯一调用): 调度窗口自检 → running →
     配置回读 → 目录树展开/去重/空护栏 → PikPakPublisherService.publish_pikpak_files →
     终态四分支 + task_update 广播 + controls 清理。"""
-    # 调度窗口自检 (统一范式见 runtime.try_claim_executor_entry): 已被用户取消/暂停则直接退出
-    if not await asyncio.to_thread(try_claim_executor_entry, task_id):
-        await TaskQueueRepository.append_log_async(
-            task_id, "[执行器] 任务在调度窗口内已被用户取消/暂停，跳过执行且不覆盖终态"
-        )
+    if not await _claim_and_mark_running(task_id):
         return
-    TaskQueueRepository.update_status(task_id, "running")
 
     cfg = await _resolve_pikpak_run_config(
         task_id,

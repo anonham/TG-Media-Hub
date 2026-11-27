@@ -78,7 +78,15 @@ class TaskTypeStrategy(ABC):
         """
         out: dict[str, Any] = {}
         for out_key, aliases, converter, default, required in self.RUN_PARAMS_SPEC:
-            raw = next((params[k] for k in aliases if params.get(k) is not None), default)
+            raw = next(
+                (
+                    params[k]
+                    for k in aliases
+                    if params.get(k) is not None
+                    and not (required and isinstance(params[k], str) and not params[k].strip())
+                ),
+                default,
+            )
             val = converter(raw) if (converter is not None and raw is not None) else raw
             if val is not None or required:
                 out[out_key] = val

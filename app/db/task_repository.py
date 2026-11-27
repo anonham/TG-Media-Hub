@@ -752,6 +752,51 @@ class TaskQueueRepository:
             return True
 
     @staticmethod
+    def commit_manual_skip_if_unchanged(
+        task_id: str,
+        expected_status: str,
+        expected_updated_at: float | None,
+        skipped_item: dict[str, Any],
+        *,
+        clear_checkpoint_fid: str = "",
+    ) -> bool:
+        """在独占写事务内按状态与版本 CAS 追加手动跳过记录并可选清理分卷检查点。"""
+        with db_immediate_tx() as cursor:
+            cursor.execute("SELECT status, updated_at, params_json FROM task_queue WHERE id = ?", (task_id,))
+            row = cursor.fetchone()
+            if not row or row[0] != expected_status:
+                return False
+            if expected_updated_at is not None and row[1] != expected_updated_at:
+                return False
+            try:
+                params = json.loads(row[2] or "{}")
+            except Exception:
+                params = {}
+            if not isinstance(params, dict):
+                params = {}
+            existing_skipped = params.get("skipped_files")
+            skipped_list = list(existing_skipped) if isinstance(existing_skipped, list) else []
+            skipped_list.append(skipped_item)
+            params["skipped_files"] = skipped_list
+            if clear_checkpoint_fid:
+                checkpoints = params.get("pikpak_part_checkpoints")
+                if isinstance(checkpoints, dict):
+                    checkpoints.pop(str(clear_checkpoint_fid), None)
+            cursor.execute(
+                "UPDATE task_queue SET params_json = ?, updated_at = ? "
+                "WHERE id = ? AND status = ? AND (? IS NULL OR updated_at = ?)",
+                (
+                    json.dumps(params, ensure_ascii=False),
+                    time.time(),
+                    task_id,
+                    expected_status,
+                    expected_updated_at,
+                    expected_updated_at,
+                ),
+            )
+            return cursor.rowcount > 0
+
+    @staticmethod
     def record_part_checkpoint(
         task_id: str,
         file_id: str,

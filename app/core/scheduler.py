@@ -144,6 +144,8 @@ class TaskScheduler:
         self._pikpak_cooldown_until: float = 0.0
         # 占位槽 editing 争用等待次数跟踪 (独立于故障 retry_count): task_id -> wait_count
         self._slot_contention_waits: set[str] = set()
+        # 暂停收尾后因暂时性 DB 写失败滞留的原地恢复请求: task_id -> resume_controls
+        self._pending_resume_requeues: dict[str, dict[str, bool]] = {}
         try:
             from app.core.metrics import download_threads_in_use
 
@@ -392,6 +394,7 @@ class TaskScheduler:
 
     async def _schedule_next_tasks(self):
         """尝试从队列拉取并派发符合并发与配额要求的任务"""
+        await self._drain_pending_resume_requeues()
         try:
             from app.core.metrics import queued_task_depth, running_tasks
 
@@ -566,7 +569,9 @@ class TaskScheduler:
                     ctrl = active_task_controls.setdefault(task_id, {"cancelled": False, "paused": False})
                     if ctrl.get("cancelled") or ctrl.get("paused"):
                         terminal = "cancelled" if ctrl.get("cancelled") else "paused"
-                        await asyncio.to_thread(TaskQueueRepository.update_status, task_id, terminal)
+                        await asyncio.to_thread(
+                            TaskQueueRepository.update_status, task_id, terminal, ("running", terminal)
+                        )
                         active_task_controls.pop(task_id, None)
                         await TaskQueueRepository.append_log_async(
                             task_id,
@@ -697,7 +702,7 @@ class TaskScheduler:
             mark_task_executor_exit(task_id)
             try:
                 logger.error("未找到任务类型 [%s] 的执行器", task_type)
-                await asyncio.to_thread(TaskQueueRepository.update_status, task_id, "failed")
+                await asyncio.to_thread(TaskQueueRepository.update_status, task_id, "failed", ("running",))
                 await TaskQueueRepository.append_log_async(
                     task_id, f"❌ 系统错误: 未找到针对任务类型 [{task_type}] 的执行器"
                 )
@@ -721,7 +726,9 @@ class TaskScheduler:
             logger.info("任务 [%s] 已被取消: %s", task_id, ce)
             current_status = (await TaskQueueRepository.get_by_id_async(task_id) or {}).get("status")
             if current_status != "cancelled":
-                await TaskQueueRepository.update_status_async(task_id, "cancelled")
+                await TaskQueueRepository.update_status_async(
+                    task_id, "cancelled", from_statuses=("running", "paused", "queued", "pending")
+                )
         except asyncio.CancelledError:
             mark_task_executor_exit(task_id)
             logger.info("任务 [%s] 协程被取消退出", task_id)
@@ -799,27 +806,27 @@ class TaskScheduler:
                 )
             elif isinstance(exc, FatalTaskError):
                 logger.error("任务 [%s] 发生致命错误: %s", task_id, exc)
-                await TaskQueueRepository.update_status_async(task_id, "failed")
-                await TaskQueueRepository.append_log_async(task_id, f"❌ 任务致命错误: {exc}")
-                try:
-                    from app.core.pipeline.placeholder import PlaceholderSlotCoordinator
+                if await TaskQueueRepository.update_status_async(task_id, "failed", from_statuses=("running",)):
+                    await TaskQueueRepository.append_log_async(task_id, f"❌ 任务致命错误: {exc}")
+                    try:
+                        from app.core.pipeline.placeholder import PlaceholderSlotCoordinator
 
-                    await PlaceholderSlotCoordinator(max_retries=max_retries).finalize_terminal(task_id)
-                except Exception as finalize_err:
-                    logger.warning("任务 [%s] 占位槽终态化异常 (不影响调度循环): %s", task_id, finalize_err)
-                try:
-                    from app.core.connection_manager import connection_manager
+                        await PlaceholderSlotCoordinator(max_retries=max_retries).finalize_terminal(task_id)
+                    except Exception as finalize_err:
+                        logger.warning("任务 [%s] 占位槽终态化异常 (不影响调度循环): %s", task_id, finalize_err)
+                    try:
+                        from app.core.connection_manager import connection_manager
 
-                    await connection_manager.broadcast(
-                        {
-                            "type": "task_update",
-                            "task_id": task_id,
-                            "status": "failed",
-                            "error_detail": str(exc),
-                        }
-                    )
-                except Exception as bcast_err:
-                    logger.debug("广播 fatal 错误状态异常 (非致命): %s", bcast_err)
+                        await connection_manager.broadcast(
+                            {
+                                "type": "task_update",
+                                "task_id": task_id,
+                                "status": "failed",
+                                "error_detail": str(exc),
+                            }
+                        )
+                    except Exception as bcast_err:
+                        logger.debug("广播 fatal 错误状态异常 (非致命): %s", bcast_err)
             else:
                 logger.warning("任务 [%s] 执行异常: %s", task_id, exc)
                 current_status = (await TaskQueueRepository.get_by_id_async(task_id) or {}).get("status")
@@ -840,15 +847,25 @@ class TaskScheduler:
             finally:
                 self.notify_new_task()
 
+    async def _drain_pending_resume_requeues(self) -> None:
+        for tid, controls in list(self._pending_resume_requeues.items()):
+            await self._requeue_resumed_pause_exit(tid, controls)
+
     async def _requeue_resumed_pause_exit(self, task_id: str, resume_controls: dict[str, bool]) -> None:
         try:
             requeued = await asyncio.to_thread(requeue_resumed_pause_exit, task_id, resume_controls)
         except DuplicateDownloadTaskError as conflict:
+            self._pending_resume_requeues.pop(task_id, None)
             await TaskQueueRepository.append_log_async(
                 task_id, f"暂停收尾后恢复遇到同键任务 (#{conflict.task_id})，保持暂停"
             )
             await connection_manager.broadcast({"type": "task_update", "task_id": task_id, "status": "paused"})
             return
+        except Exception as exc:
+            self._pending_resume_requeues[task_id] = resume_controls
+            logger.warning("任务 [%s] 暂停收尾后恢复重新入队暂失败，保留恢复意图稍后重试: %s", task_id, exc)
+            return
+        self._pending_resume_requeues.pop(task_id, None)
         if requeued:
             await TaskQueueRepository.append_log_async(task_id, "[调度器] 旧执行器已完成暂停收尾，恢复请求已重新入队")
             await connection_manager.broadcast({"type": "task_update", "task_id": task_id, "status": "queued"})
@@ -904,7 +921,8 @@ class TaskScheduler:
             self.set_pikpak_cooldown(next_retry_at)
 
             error_msg = f"⏳ CDN 边缘频控保护 (Tier 1 浅度冷却 {int(delay)}s)"
-            await TaskQueueRepository.mark_retry_async(task_id, next_retry_count, next_retry_at, error_msg)
+            if not await TaskQueueRepository.mark_retry_async(task_id, next_retry_count, next_retry_at, error_msg):
+                return
             await TaskQueueRepository.append_log_async(
                 task_id,
                 f"⚠️ 检测到 CDN 节点频控/过载 (HTTP 429/503)，进入 Tier 1 静默冷却 "
@@ -951,7 +969,8 @@ class TaskScheduler:
             self.set_pikpak_cooldown(next_retry_at)
 
             error_msg = f"⏳ CDN 边缘频控保护 (Tier 2 深度冷却 {int(delay)}s + 换链漂移 + 稳态降档)"
-            await TaskQueueRepository.mark_retry_async(task_id, next_retry_count, next_retry_at, error_msg)
+            if not await TaskQueueRepository.mark_retry_async(task_id, next_retry_count, next_retry_at, error_msg):
+                return
             await TaskQueueRepository.append_log_async(
                 task_id,
                 f"⚠️ CDN 频控/数据面拦截加剧，进入 Tier 2 深度冷却 ({int(delay // 60)} 分钟) 并已自动降档为保守稳态 "
@@ -1139,7 +1158,8 @@ class TaskScheduler:
             logger.info("任务 [%s] 将于 %.1fs 后重试 (%d/%d)", task_id, delay, next_count, max_retries)
         else:
             if count_retry:
-                await TaskQueueRepository.update_status_async(task_id, "failed")
+                if not await TaskQueueRepository.update_status_async(task_id, "failed", from_statuses=("running",)):
+                    return
                 log_message = f"❌ 任务重试次数已耗尽 ({max_retries} 次)，最终失败: {error_msg}"
             else:
                 wait_seconds = int(self.SLOT_CONTENTION_DELAY_SECONDS)
@@ -1207,6 +1227,9 @@ class TaskScheduler:
         if task_id not in self._task_thread_allocations and task_id not in self._running_tasks:
             return
         old_threads = self._task_thread_allocations.get(task_id, 0)
+        other_threads = max(0, self._global_download_threads - old_threads)
+        max_allowed = max(old_threads, self.MAX_GLOBAL_DOWNLOAD_THREADS - other_threads)
+        clamped_new = min(clamped_new, max_allowed)
         delta = clamped_new - old_threads
         self._task_thread_allocations[task_id] = clamped_new
         self._global_download_threads = max(0, self._global_download_threads + delta)

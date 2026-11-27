@@ -80,8 +80,9 @@ class PikPakPublishStrategy(TaskTypeStrategy):
                 all_published = True
                 for rf in remote_files:
                     fid = rf.get("file_id") if isinstance(rf, dict) else getattr(rf, "file_id", None)
-                    if not fid:
-                        continue
+                    if not fid or (isinstance(fid, str) and not fid.strip()):
+                        all_published = False
+                        break
                     if force_republish:
                         pub_info = PublishHistoryRepository.get_published_info(
                             parsed_target, "", 0, source_type="pikpak", remote_file_id=str(fid)

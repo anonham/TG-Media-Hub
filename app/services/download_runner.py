@@ -41,7 +41,8 @@ _PAUSED_LOG = "[调度器] 任务已安全暂停，断点已留存，已完全�
 
 async def _finalize_failed_task(task_id: str, failed_items: list[tuple]):
     """部分条目下载失败: 任务整体置 failed 并汇总失败清单, 绝不伪造完成态"""
-    await TaskQueueRepository.update_status_async(task_id, "failed")
+    if not await TaskQueueRepository.update_status_async(task_id, "failed", from_statuses=("running",)):
+        return
     sample = "；".join(f"{ident}: {reason}" for ident, reason in failed_items[:_FAILED_ITEMS_LOG_LIMIT])
     more = (
         f" (仅展示前 {_FAILED_ITEMS_LOG_LIMIT} 条，共 {len(failed_items)} 条失败)"
@@ -523,7 +524,8 @@ async def _download_album_members(
 
 async def _finalize_download_completed(task_id: str, state: _DownloadRunState, completion_label: str) -> None:
     """完成态收尾: 状态 + 终态进度回写 + 双广播 (100% 全量完成)"""
-    await TaskQueueRepository.update_status_async(task_id, "completed")
+    if not await TaskQueueRepository.update_status_async(task_id, "completed", from_statuses=("running",)):
+        return
     final_bytes = state.cumulative_done_bytes
     await TaskQueueRepository.update_progress_async(
         task_id,
@@ -565,16 +567,32 @@ async def _raise_if_cancelled(task_id: str):
         raise TaskCancelledError("任务已被用户取消")
 
 
-async def run_download_links_task(
-    task_id: str, links: list[str], threads: int | None = None, account_id: int | None = None, force: bool = False
-):
-    # 调度窗口自检 (统一范式见 runtime.try_claim_executor_entry): 已被用户取消/暂停则直接退出
+async def _claim_and_mark_running(task_id: str) -> bool:
+    """调度窗口自检并原子置位 running；已被取消/暂停时跳过执行且不覆盖终态。"""
     if not await asyncio.to_thread(try_claim_executor_entry, task_id):
         await TaskQueueRepository.append_log_async(
             task_id, "[执行器] 任务在调度窗口内已被用户取消/暂停，跳过执行且不覆盖终态"
         )
+        return False
+    if (
+        not await TaskQueueRepository.update_status_async(
+            task_id, "running", from_statuses=("queued", "pending", "running")
+        )
+        and await asyncio.to_thread(TaskQueueRepository.get_status, task_id) is not None
+    ):
+        await TaskQueueRepository.append_log_async(
+            task_id, "[执行器] 任务在调度窗口内已被用户取消/暂停，跳过执行且不覆盖终态"
+        )
+        release_runner_controls(task_id)
+        return False
+    return True
+
+
+async def run_download_links_task(
+    task_id: str, links: list[str], threads: int | None = None, account_id: int | None = None, force: bool = False
+):
+    if not await _claim_and_mark_running(task_id):
         return
-    await TaskQueueRepository.update_status_async(task_id, "running")
     await TaskQueueRepository.append_log_async(task_id, f"开始处理 {len(links)} 条下载链接...")
     state = _DownloadRunState(total_items=len(links))
     effective_threads, current_account_id = await _resolve_boot_config(task_id, threads, account_id, "")
@@ -911,13 +929,8 @@ async def run_download_range_task(
     account_id: int | None = None,
     force: bool = False,
 ):
-    # 调度窗口自检 (统一范式见 runtime.try_claim_executor_entry): 已被用户取消/暂停则直接退出
-    if not await asyncio.to_thread(try_claim_executor_entry, task_id):
-        await TaskQueueRepository.append_log_async(
-            task_id, "[执行器] 任务在调度窗口内已被用户取消/暂停，跳过执行且不覆盖终态"
-        )
+    if not await _claim_and_mark_running(task_id):
         return
-    await TaskQueueRepository.update_status_async(task_id, "running")
     await TaskQueueRepository.append_log_async(
         task_id, f"开始抓取频道 [{channel_identifier}] 消息范围 {start_id} ~ {end_id}..."
     )

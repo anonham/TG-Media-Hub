@@ -17,6 +17,7 @@ from app.core.entity_resolver import parse_chat_identifier, resolve_entity
 from app.core.pipeline.placeholder import PENDING_CARD_TEXT, as_named_stream, load_static_poster
 from app.core.runtime import (
     active_task_controls,
+    commit_manual_skip_if_unchanged,
     requeue_task_and_clear_controls,
     resume_paused_executor,
     stop_task_with_controls,
@@ -272,10 +273,13 @@ def _sync_purge_task_files_and_meta(
             else DownloadBreakpointRepository.get_breakpoint_paths_by_task(tid)
         )
         targets = [p for p in bp_paths["part"] + bp_paths["meta"] if p]
-        if targets:
-            result = StorageService.delete_files(targets)
-            f_deleted = list(result.get("deleted") or [])
-            f_skipped = list(result.get("skipped") or [])
+        for target in targets:
+            try:
+                result = StorageService.delete_files([target])
+                f_deleted.extend(result.get("deleted") or [])
+                f_skipped.extend(result.get("skipped") or [])
+            except Exception as del_err:
+                f_skipped.append({"path": target, "reason": f"清理异常: {del_err}"})
     try:
         gc_task_meta(tid)
     except Exception as gc_err:
@@ -497,6 +501,8 @@ class TaskLifecycleService:
         sched: TaskScheduler | None = None,
         drain_polls: int = 32,
     ) -> dict[str, Any]:
+        if mode not in ("normal", "steady"):
+            raise HTTPException(status_code=400, detail="不支持的恢复模式 (仅支持 normal 或 steady)")
         active_sched = sched or task_scheduler
         task = await TaskQueueRepository.get_by_id_async(task_id)
         if not task:
@@ -686,13 +692,14 @@ class TaskLifecycleService:
             raise HTTPException(status_code=404, detail="任务不存在")
 
         status = str(task.get("status") or "")
-        if status == "running":
+        if status == "running" or task_scheduler.is_task_running(task_id):
             raise HTTPException(status_code=409, detail="当前任务正在运行中，请先暂停任务后再执行跳过当前文件操作")
         if status not in ("paused", "failed", "queued", "cancelled"):
             raise HTTPException(
                 status_code=400,
                 detail=f"当前状态 {status} 的任务不支持跳过文件操作 (仅暂停中/已失败/排队中任务支持)",
             )
+        expected_version = task.get("updated_at")
 
         task_type = str(task.get("task_type") or "")
         params = task.get("params") or {}
@@ -718,6 +725,15 @@ class TaskLifecycleService:
         slot_identity = f"pikpak://{parent_folder_id}/{file_name}" if task_type == "pikpak_publish" else file_name
         skip_reason = req.reason if req and req.reason else "用户手动跳过"
 
+        latest = await TaskQueueRepository.get_by_id_async(task_id)
+        if (
+            task_scheduler.is_task_running(task_id)
+            or not latest
+            or latest.get("status") != status
+            or latest.get("updated_at") != expected_version
+        ):
+            raise HTTPException(status_code=409, detail="任务状态在跳过期间已变更，请刷新后重试")
+
         msg_id = await _ensure_skip_placeholder_slot(
             task_id,
             task.get("account_id"),
@@ -728,20 +744,6 @@ class TaskLifecycleService:
             skip_reason,
         )
 
-        PublishHistoryRepository.record(
-            target_chat_id,
-            slot_identity,
-            file_size,
-            "",
-            source_type=source_type,
-            remote_file_id=fid if fid else "",
-            tg_message_id=msg_id,
-            task_id=task_id,
-        )
-
-        if fid:
-            await TaskQueueRepository.clear_part_checkpoint_async(task_id, fid)
-
         skipped_item = {
             "file_name": file_name,
             "rel_path": slot_identity,
@@ -750,9 +752,28 @@ class TaskLifecycleService:
             "oversize_kind": "manual_skip",
             "reason": skip_reason,
         }
-        existing_skipped = list(params.get("skipped_files") or [])
-        existing_skipped.append(skipped_item)
-        await TaskQueueRepository.merge_params_async(task_id, {"skipped_files": existing_skipped})
+        committed = await asyncio.to_thread(
+            commit_manual_skip_if_unchanged,
+            task_id,
+            status,
+            expected_version,
+            skipped_item,
+            clear_checkpoint_fid=fid,
+            is_running_fn=task_scheduler.is_task_running,
+            record_history_fn=partial(
+                PublishHistoryRepository.record,
+                target_chat_id,
+                slot_identity,
+                file_size,
+                "",
+                source_type=source_type,
+                remote_file_id=fid if fid else "",
+                tg_message_id=msg_id,
+                task_id=task_id,
+            ),
+        )
+        if not committed:
+            raise HTTPException(status_code=409, detail="任务状态在跳过期间已变更，请刷新后重试")
 
         card_tip = f"并在频道留置 ⏳ 待回填占位卡 (msg #{msg_id})" if msg_id else "（未留置实体占位卡）"
         log_text = f"⏭️ [用户操作] 用户手动跳过文件 [{file_name}] {card_tip}，防重账本已生效，后续调度将自动跳过"
@@ -887,7 +908,14 @@ class TaskLifecycleService:
             )
         except Exception as purge_err:
             logger.warning("任务 %s 删除后文件/元数据清理异常 (孤儿由 GC 兜底): %s", task_id, purge_err)
-            files_deleted, files_skipped = [], []
+            files_deleted = []
+            targets = [p for p in (bp_snapshot or {}).get("part", []) + (bp_snapshot or {}).get("meta", []) if p]
+            if targets:
+                files_skipped = [{"path": p, "reason": f"清理异常: {purge_err}"} for p in targets]
+            elif delete_files:
+                files_skipped = [{"path": task_id, "reason": f"清理异常: {purge_err}"}]
+            else:
+                files_skipped = []
         active_task_controls.pop(task_id, None)
         await connection_manager.broadcast({"type": "task_update", "task_id": task_id, "status": "deleted"})
         return {"status": "deleted", "files_deleted": files_deleted, "files_skipped": files_skipped}

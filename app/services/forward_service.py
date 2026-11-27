@@ -24,7 +24,7 @@ from app.core.entity_resolver import (
 )
 from app.core.intervals import compute_gaps
 from app.core.redact import redact_telegram_invites
-from app.core.runtime import mark_task_pause_exit, release_runner_controls, try_claim_executor_entry
+from app.core.runtime import mark_task_pause_exit, release_runner_controls, set_task_control, try_claim_executor_entry
 from app.core.scheduler import TaskCancelledError, TaskPausedError
 from app.core.session_errors import is_session_invalid_error, report_session_invalid
 from app.db.forward_repository import ForwardLedgerRepository
@@ -912,14 +912,15 @@ async def _commit_batch(state: _ForwardRunState, ctx: _ForwardRunCtx, batch_ids:
 
     # 试转模式: 首个批次完成后自动置为 paused (复用现有暂停信号，不引入新状态值)
     if state.dry_run and state.task_id and not state.dry_pause_done:
-        from app.core.runtime import active_task_controls
-
+        await _check_task_signals(state)
         state.dry_pause_done = True
-        active_task_controls.setdefault(state.task_id, {})
-        active_task_controls[state.task_id]["paused"] = True
-        await TaskQueueRepository.update_status_async(state.task_id, "paused")
-        await connection_manager.broadcast({"type": "task_update", "task_id": state.task_id, "status": "paused"})
-        await _log_task_event(state, "🎬 试转首批已完成，已自动暂停；请到目标频道验收消息后点击【恢复】继续全量转发")
+        mark_task_pause_exit(state.task_id)
+        set_task_control(state.task_id, paused=True)
+        if await TaskQueueRepository.update_status_async(state.task_id, "paused", from_statuses=("running", "paused")):
+            await connection_manager.broadcast({"type": "task_update", "task_id": state.task_id, "status": "paused"})
+            await _log_task_event(
+                state, "🎬 试转首批已完成，已自动暂停；请到目标频道验收消息后点击【恢复】继续全量转发"
+            )
         await _check_task_signals(state)
 
 
@@ -1113,7 +1114,18 @@ async def _broadcast_forward_start(state: _ForwardRunState, start_id: int | None
     """转发启动态: running 置位 + 初始进度回写 + WS 广播"""
     if not state.task_id:
         return
-    await TaskQueueRepository.update_status_async(state.task_id, "running")
+    updated = await TaskQueueRepository.update_status_async(
+        state.task_id, "running", from_statuses=("queued", "pending", "running")
+    )
+    if not updated:
+        await _check_task_signals(state)
+        db_status = await asyncio.to_thread(TaskQueueRepository.get_status, state.task_id)
+        if db_status == "cancelled":
+            raise ForwardCancelledError("Task cancelled before forward start")
+        if db_status == "paused":
+            raise ForwardPausedError("Task paused before forward start")
+        if db_status is not None:
+            return
     range_hint = f" (范围 ID {start_id or 1} ~ {end_id or '最新'})" if (start_id or end_id) else ""
     await TaskQueueRepository.update_progress_async(
         state.task_id,

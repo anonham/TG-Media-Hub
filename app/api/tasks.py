@@ -1,5 +1,5 @@
 import logging
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Query
 
@@ -115,7 +115,8 @@ async def pause_task(task_id: str):
 
 @router.post("/{task_id}/resume", response_model=TaskResumeResponse, responses=_TASK_REQUEUE_CONFLICT)
 async def resume_task(
-    task_id: str, mode: str = Query("normal", description="恢复模式: normal (原速) | steady (低速稳态)")
+    task_id: str,
+    mode: Annotated[str, Query(description="恢复模式: normal (原速) | steady (低速稳态)")] = "normal",
 ):
     return await TaskLifecycleService.resume_task(task_id, mode=mode, sched=task_scheduler)
 

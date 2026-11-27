@@ -277,17 +277,57 @@ def settle_task_pause_exit(task_id: str) -> dict[str, bool] | None:
 
 
 def requeue_resumed_pause_exit(task_id: str, resume_controls: dict[str, bool]) -> bool:
-    from app.db.task_repository import TaskQueueRepository
+    from app.db.task_repository import DuplicateDownloadTaskError, TaskQueueRepository
 
     with _task_transition_lock(task_id):
         with _runtime_lock:
             current = dict.get(active_task_controls, task_id)
             if current is not resume_controls:
                 return False
-            active_task_controls.pop(task_id, None)
             if not current.get("resumed_in_place") or current.get("paused") or current.get("cancelled"):
+                active_task_controls.pop(task_id, None)
                 return False
-        return TaskQueueRepository.requeue_task_for_resume(task_id, "paused", params_patch={})
+        try:
+            requeued = TaskQueueRepository.requeue_task_for_resume(task_id, "paused", params_patch={})
+        except DuplicateDownloadTaskError:
+            with _runtime_lock:
+                if dict.get(active_task_controls, task_id) is resume_controls:
+                    active_task_controls.pop(task_id, None)
+            raise
+        with _runtime_lock:
+            if dict.get(active_task_controls, task_id) is resume_controls:
+                active_task_controls.pop(task_id, None)
+        return requeued
+
+
+def commit_manual_skip_if_unchanged(
+    task_id: str,
+    expected_status: str,
+    expected_updated_at: float | None,
+    skipped_item: dict[str, Any],
+    *,
+    clear_checkpoint_fid: str = "",
+    is_running_fn: Callable[[str], bool] | None = None,
+    record_history_fn: Callable[[], Any] | None = None,
+) -> bool:
+    """在任务转换锁内原子提交手动跳过账本与跳过记录，防止与重试交错。"""
+    from app.db.task_repository import TaskQueueRepository
+
+    with _task_transition_lock(task_id):
+        if is_running_fn is not None and is_running_fn(task_id):
+            return False
+        committed = TaskQueueRepository.commit_manual_skip_if_unchanged(
+            task_id,
+            expected_status,
+            expected_updated_at,
+            skipped_item,
+            clear_checkpoint_fid=clear_checkpoint_fid,
+        )
+        if not committed:
+            return False
+        if record_history_fn is not None:
+            record_history_fn()
+        return True
 
 
 def try_claim_executor_entry(task_id: str) -> bool:

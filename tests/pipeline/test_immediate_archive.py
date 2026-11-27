@@ -6,11 +6,12 @@
 
 import os
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from _cm_seed import seed_default_account
 from pydantic import ValidationError
+from telethon.errors import BadRequestError
 
 from app.config import settings
 from app.core.client_manager import client_manager
@@ -18,6 +19,7 @@ from app.core.pipeline.cleanup import (
     PikPakDeleteCleanupStrategy,
     PikPakStructuredArchiveStrategy,
 )
+from app.core.pipeline.engines.album_delivery import UnconfirmedAlbumError
 from app.core.pipeline.models import PublishContext, PublishItem
 from app.core.stream_chunk_provider import BaseChunkProvider
 from app.db.task_repository import TaskQueueRepository
@@ -604,11 +606,11 @@ async def test_album_mode_groups_images_and_gates_oversize(pik_env):
 
 @pytest.mark.asyncio
 async def test_album_group_failure_all_failed_zero_ingestion(pik_env):
-    """整组失败 → 全员 failed 且零入库 (对齐本地相册语义)。"""
+    """整组明确拒收 → 释放 pending_album_delivery，全员 failed 且零入库 (对齐本地相册语义)。"""
     from app.db.database import get_db
 
     TaskQueueRepository.create("v2_album2", "pikpak_publish", {"target_channel": TARGET})
-    pik_env.client.send_file = AsyncMock(side_effect=RuntimeError("album send boom"))
+    pik_env.client.send_file = AsyncMock(side_effect=BadRequestError(request=None, message="MEDIA_EMPTY"))
 
     raw = [_make_image("IMGF1.jpg"), _make_image("IMGF2.jpg")]
     res = await PikPakPublisherService.publish_pikpak_files(
@@ -620,6 +622,7 @@ async def test_album_group_failure_all_failed_zero_ingestion(pik_env):
     )
     assert res.published_count == 0
     assert len(res.failed_files) == 2
+    assert (TaskQueueRepository.get_by_id("v2_album2")["params"] or {}).get("pending_album_delivery") is None
     rows = (
         get_db()
         .execute(
@@ -628,6 +631,48 @@ async def test_album_group_failure_all_failed_zero_ingestion(pik_env):
         .fetchone()
     )
     assert rows["c"] == 0, "整组失败必须零入库"
+
+
+@pytest.mark.asyncio
+async def test_album_unconfirmed_send_preserves_pending_and_blocks_resume(pik_env):
+    """相册发送发生未确认异常 → 保留 pending_album_delivery 并拦截后续同任务恢复重发。"""
+    from app.db.database import get_db
+
+    TaskQueueRepository.create("v2_album2_unconfirmed", "pikpak_publish", {"target_channel": TARGET})
+    pik_env.client.send_file = AsyncMock(side_effect=RuntimeError("album send boom"))
+
+    raw = [_make_image("IMGFU1.jpg"), _make_image("IMGFU2.jpg")]
+    with pytest.raises(UnconfirmedAlbumError):
+        await PikPakPublisherService.publish_pikpak_files(
+            remote_files=raw,
+            target_chat_id=TARGET,
+            task_id="v2_album2_unconfirmed",
+            album_mode=True,
+            send_delay_seconds=0,
+        )
+    assert TaskQueueRepository.get_by_id("v2_album2_unconfirmed")["params"]["pending_album_delivery"] == [
+        "IMGFU1.jpg",
+        "IMGFU2.jpg",
+    ]
+    rows = (
+        get_db()
+        .execute(
+            "SELECT COUNT(*) AS c FROM publish_history WHERE source_type='pikpak' AND remote_file_id IN ('IMGFU1.jpg','IMGFU2.jpg')"
+        )
+        .fetchone()
+    )
+    assert rows["c"] == 0
+
+    pik_env.client.send_file.reset_mock()
+    with pytest.raises(UnconfirmedAlbumError):
+        await PikPakPublisherService.publish_pikpak_files(
+            remote_files=raw,
+            target_chat_id=TARGET,
+            task_id="v2_album2_unconfirmed",
+            album_mode=True,
+            send_delay_seconds=0,
+        )
+    pik_env.client.send_file.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -966,19 +1011,23 @@ async def test_album_group_failure_reason_uses_user_detail(pik_env):
     """包4 (K4): 相册组失败三处 (任务日志/b.failed/明细) 同口径 getattr(user_detail) or
     str(exc) —— taxonomy 异常呈现 user_detail 文案。口径钉死用例 (taxonomy str==user_detail
     恒成立, 防未来 __str__/包装策略漂移)。"""
-    from app.core.pikpak.taxonomy import FAILURE_DETAIL_TEXT, PikPakPublishRetryableError
+    from app.core.pikpak.taxonomy import FAILURE_DETAIL_TEXT, PikPakPublishError
     from app.db.database import get_db
 
     TaskQueueRepository.create("polish_k4", "pikpak_publish", {"target_channel": TARGET})
-    pik_env.client.send_file = AsyncMock(side_effect=PikPakPublishRetryableError("link_expired"))
     raw = [_make_image("IMGK41.jpg", parent_id="R"), _make_image("IMGK42.jpg", parent_id="R")]
-    res = await PikPakPublisherService.publish_pikpak_files(
-        remote_files=raw,
-        target_chat_id=TARGET,
-        task_id="polish_k4",
-        album_mode=True,
-        send_delay_seconds=0,
-    )
+    with patch(
+        "app.core.pipeline.engines.PikPakStreamTransportEngine.send_album",
+        new_callable=AsyncMock,
+        side_effect=PikPakPublishError("link_expired"),
+    ):
+        res = await PikPakPublisherService.publish_pikpak_files(
+            remote_files=raw,
+            target_chat_id=TARGET,
+            task_id="polish_k4",
+            album_mode=True,
+            send_delay_seconds=0,
+        )
     expected = FAILURE_DETAIL_TEXT["link_expired"]
     assert res.published_count == 0
     assert len(res.failed_files) == 2

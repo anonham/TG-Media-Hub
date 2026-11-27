@@ -780,7 +780,7 @@ async def test_pikpak_stream_transport_engine_multipart():
         patch.object(engine, "_make_thumb_provider", return_value=None),
     ):
         outcome = await engine.send_item(item, ctx)
-        assert outcome.message_ids == [102]
+        assert outcome.message_ids == [101, 102]
         assert mock_ft.call_count == 2
         assert mock_client.send_file.call_count == 2
         # 验证分卷 caption

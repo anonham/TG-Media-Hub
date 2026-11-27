@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from _cm_seed import seed_default_account, unseed_accounts
 from _safeio import safe_write_bytes
-from telethon.errors import ChatWriteForbiddenError, FloodWaitError, RPCError
+from telethon.errors import ChatWriteForbiddenError, FloodWaitError, RPCError, SlowModeWaitError
 from telethon.tl.types import (
     Channel,
     DocumentAttributeFilename,
@@ -263,7 +263,8 @@ async def test_forward_bisect_isolate_single_bad_message(tmp_dir):
 
 
 @pytest.mark.asyncio
-async def test_forward_flood_wait_circuit_breaker():
+@pytest.mark.parametrize("wait_type", [FloodWaitError, SlowModeWaitError])
+async def test_forward_flood_wait_circuit_breaker(wait_type):
     """测试 FloodWait 顶级熔断拦截与绝对休眠重试机制"""
     mock_client = AsyncMock()
     mock_client.is_connected = MagicMock(return_value=True)
@@ -287,7 +288,7 @@ async def test_forward_flood_wait_circuit_breaker():
         nonlocal calls
         calls += 1
         if calls == 1:
-            err = FloodWaitError(request=None)
+            err = wait_type(request=None)
             err.seconds = 0.01
             raise err
         return [MagicMock(id=3001)]
@@ -1800,7 +1801,7 @@ async def test_partial_ledger_does_not_cover_unsent_prefix():
 @pytest.mark.parametrize(
     ("exc", "expected"),
     [
-        (ValueError("Request was unsuccessful 5 time(s)"), "retry"),
+        (ValueError("Request was unsuccessful 5 time(s)"), "unknown"),
         (RPCError(request=None, message="MESSAGE_ID_INVALID"), "isolate"),
     ],
 )
@@ -1808,7 +1809,14 @@ async def test_telethon_retry_exhaustion_classification(exc, expected):
     from app.services.forward_service import _handle_forward_send_failure
 
     state = _ForwardRunState(None, SRC, TGT, 4, False, False)
-    assert await _handle_forward_send_failure(state, exc) == expected
+    from app.core.scheduler import FatalTaskError
+
+    if expected == "unknown":
+        with pytest.raises(FatalTaskError, match="转发结果未知") as caught:
+            await _handle_forward_send_failure(state, exc)
+        assert caught.value.__cause__ is exc
+    else:
+        assert await _handle_forward_send_failure(state, exc) == expected
 
 
 @pytest.mark.asyncio
@@ -1988,6 +1996,8 @@ async def test_forward_transport_errors_never_isolated_as_bad_id(monkeypatch, tr
     mock_client.get_messages = AsyncMock(return_value=MagicMock(total=3))
     mock_client.get_entity = AsyncMock(return_value=MagicMock(id=1001))
 
+    from app.core.scheduler import FatalTaskError
+
     calls = 0
 
     async def always_disconnect(entity, messages, from_peer, **kwargs):
@@ -1999,7 +2009,7 @@ async def test_forward_transport_errors_never_isolated_as_bad_id(monkeypatch, tr
 
     with (
         patch("app.core.client_manager.client_manager.userbot", mock_client),
-        pytest.raises((ConnectionError, TimeoutError, OSError)),
+        pytest.raises(FatalTaskError if expected_calls == 1 else ConnectionError),
     ):
         await ForwardService.forward_channel_messages(
             source_chat=src, target_chat=tgt, batch_size=10, delay_seconds=0.01

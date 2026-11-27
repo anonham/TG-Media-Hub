@@ -451,6 +451,14 @@ async def test_vsse_checkpoint_skipping_and_strict_rollback():
     task_id = f"t_vsse_cp_{int(time.time() * 1000)}"
 
     # 1. 预设检查点：Part 1 已交付 (msg_id=9001)
+    from app.core.pipeline.engines.pikpak.vsse import VsseSplitChannel
+
+    item = PublishItem(item_id="fid_vsse", name="video.mp4", size_bytes=3000000000)
+    plans = [
+        MagicMock(part_index=1, total_parts=2, envelope_length=1000, part_name="part1.mp4"),
+        MagicMock(part_index=2, total_parts=2, envelope_length=1000, part_name="part2.mp4"),
+    ]
+    plan_sig = VsseSplitChannel(item, None, plans, [b"hdr1", b"hdr2"], None, None).get_plan_signature(plans)
     TaskQueueRepository.create(
         task_id=task_id,
         task_type="pikpak_publish",
@@ -461,6 +469,7 @@ async def test_vsse_checkpoint_skipping_and_strict_rollback():
                     "strategy": "vsse",
                     "total_parts": 2,
                     "threshold": 2044723200,
+                    "plan_signature": plan_sig,
                     "delivered": {"1": 9001},
                 }
             },
@@ -468,12 +477,7 @@ async def test_vsse_checkpoint_skipping_and_strict_rollback():
     )
 
     try:
-        item = PublishItem(item_id="fid_vsse", name="video.mp4", size_bytes=3000000000)
         context = PublishContext(task_id=task_id, target_chat_id="-1001", is_premium=False, delay_seconds=0.0)
-
-        mock_plan1 = MagicMock(part_index=1, total_parts=2, envelope_length=1000, part_name="part1.mp4")
-        mock_plan2 = MagicMock(part_index=2, total_parts=2, envelope_length=1000, part_name="part2.mp4")
-        plans = [mock_plan1, mock_plan2]
 
         with (
             patch.object(
@@ -505,7 +509,8 @@ async def test_vsse_checkpoint_skipping_and_strict_rollback():
 
             # 全部完成后检查点被清理
             row = TaskQueueRepository.get_by_id(task_id)
-            assert "fid_vsse" not in (row["params"].get("pikpak_part_checkpoints") or {})
+            assert row["params"]["pikpak_part_checkpoints"]["fid_vsse"]["delivered"] == {"1": 9001, "2": 9002}
+            TaskQueueRepository.clear_part_checkpoint(task_id, "fid_vsse")
 
         # 2. 严格回滚测试：发生 UploadPausedError 暂停时严禁删除已发分卷
         with (
@@ -675,7 +680,8 @@ async def test_fmp4_checkpoint_skipping_and_strict_rollback():
 
             # 全部完成后检查点被清理
             row = TaskQueueRepository.get_by_id(task_id)
-            assert "fid_fmp4" not in (row["params"].get("pikpak_part_checkpoints") or {})
+            assert row["params"]["pikpak_part_checkpoints"]["fid_fmp4"]["delivered"] == {"1": 9501, "2": 9502}
+            TaskQueueRepository.clear_part_checkpoint(task_id, "fid_fmp4")
 
         # 严格回滚测试：发生中断时非惩罚性保全
         with (
@@ -844,7 +850,8 @@ async def test_raw_checkpoint_skipping():
 
             # 全部完成后检查点被清理
             row = TaskQueueRepository.get_by_id(task_id)
-            assert "fid_raw" not in (row["params"].get("pikpak_part_checkpoints") or {})
+            assert row["params"]["pikpak_part_checkpoints"]["fid_raw"]["delivered"] == {"1": 9801, "2": 9802}
+            TaskQueueRepository.clear_part_checkpoint(task_id, "fid_raw")
 
     finally:
         TaskQueueRepository.delete(task_id)

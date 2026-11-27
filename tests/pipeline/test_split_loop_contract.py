@@ -95,7 +95,7 @@ async def test_happy_path_records_checkpoints_clears_and_breathes() -> None:
     assert outcome.speed_mb_s == 1.7
     assert outcome.client_label == "Userbot #1"
     assert m_rec.await_count == 2
-    m_clr.assert_awaited_once()
+    m_clr.assert_not_awaited()
     m_breath.assert_awaited_once()
     channel.aclose.assert_awaited_once()
 
@@ -189,7 +189,7 @@ async def test_oversize_replans_with_forced_parts_then_succeeds() -> None:
     channel.handle_oversize.assert_awaited_once()
     assert channel.handle_oversize.await_args.kwargs["replan_count"] == 1
     capture.discard_part_sink.assert_called_once()
-    assert m_clr.await_count == 2  # oversize 清一次 + 成功终态清一次
+    m_clr.assert_awaited_once()  # 重规划时清理，发送成功后保留到文件入账
     assert outcome.message_ids == [911, 912, 913]
 
 
@@ -396,7 +396,7 @@ async def test_split_loop_compensates_delivery_when_checkpoint_persist_fails() -
             TaskQueueRepository,
             "record_part_checkpoint_async",
             new_callable=AsyncMock,
-            side_effect=[None, RuntimeError("db locked"), RuntimeError("db locked")],
+            side_effect=[None, RuntimeError("db locked"), RuntimeError("db locked"), None],
         ),
         patch.object(TaskQueueRepository, "clear_part_checkpoint_async", new_callable=AsyncMock) as m_clr,
         patch("app.core.pipeline.engines.pikpak.split_loop._inter_part_breathing_delay", new_callable=AsyncMock),
@@ -428,7 +428,7 @@ async def test_split_loop_preserves_checkpoint_when_replan_or_dispose_delete_fai
     from app.core.pipeline.engines.pikpak.split_loop import _dispose_failed_delivery, _replan_after_oversize
     from app.core.scheduler import RetryableTaskError
 
-    store = MagicMock()
+    store = AsyncMock()
     store.clear_part_checkpoint = AsyncMock()
     channel = MagicMock()
     channel.channel_name = "fmp4"
@@ -560,7 +560,7 @@ async def test_split_loop_resume_uses_saved_total_parts_and_cleans_mismatch():
             reporter=MagicMock(),
         )
     m_del.assert_awaited_once_with(client2, ctx.target_chat_id, [111], propagate_flood_wait=True)
-    assert m_clr.await_count >= 2
+    m_clr.assert_awaited_once()
     assert events.index("delete") < events.index("stream:1")
     assert events.index("clear") < events.index("stream:1")
     assert out2.message_ids == [444, 555]

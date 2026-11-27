@@ -213,8 +213,8 @@ def test_forward_dry_run_resume_lifecycle():
     首批完成后自动暂停 -> resume -> 验证 dry_run 清除为 False 且 start_id 正确推进
     """
     task_id = "test_fwd_dry_run"
-    source = "-100900038"
-    target = "-100900039"
+    source = "-1000000900038"
+    target = "-1000000900039"
     TaskQueueRepository.create(
         task_id,
         "forward_channel",

@@ -843,7 +843,7 @@ async def test_pikpak_relink_retry_multipart_idempotency():
     assert upload_part_calls == [1, 2, 2], f"实际上传分卷顺序: {upload_part_calls}"
 
     # 3. 验证返回终态消息 ID 为 Part 2 的消息 ID (1002)
-    assert outcome.message_ids == [1002]
+    assert outcome.message_ids == [1001, 1002]
 
 
 def test_run_cli_rejects_metachars_for_batch_launcher(monkeypatch):

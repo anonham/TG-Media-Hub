@@ -118,6 +118,7 @@ def test_build_remux_video_attributes_prefers_valid_item_dims():
 async def test_pikpak_send_item_ts_auto_remux_and_identity_preserved():
     store = MagicMock()
     store.append_log = AsyncMock()
+    store.get_by_id = AsyncMock(return_value=None)
     link_provider = AsyncMock(return_value=["https://cdn.pikpak/sample.ts"])
     engine = PikPakStreamTransportEngine(link_provider=link_provider, store=store)
 
@@ -176,6 +177,7 @@ async def test_pikpak_send_item_ts_auto_remux_and_identity_preserved():
 async def test_pikpak_send_item_ts_incompatible_codec_falls_back_to_raw():
     store = MagicMock()
     store.append_log = AsyncMock()
+    store.get_by_id = AsyncMock(return_value=None)
     engine = PikPakStreamTransportEngine(
         link_provider=AsyncMock(return_value=["https://cdn.pikpak/mpeg2.ts"]),
         store=store,
@@ -354,6 +356,7 @@ async def test_local_disk_send_and_edit_ts_auto_remux_and_fallback(tmp_path: Pat
     registry.bots = []
     store = MagicMock()
     store.append_log = AsyncMock()
+    store.get_by_id = AsyncMock(return_value=None)
 
     engine = LocalDiskTransportEngine(registry=registry, store=store)
     ctx = _make_context(userbot_client=mock_userbot, source_type="local", bot_routing_threshold_bytes=1024)

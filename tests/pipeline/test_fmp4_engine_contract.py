@@ -655,6 +655,7 @@ async def test_fmp4_oversize_dynamic_replanning_self_healing():
     )
     mock_client = AsyncMock()
     mock_client.delete_messages = AsyncMock()
+    mock_client.get_messages = AsyncMock(return_value=[None])
 
     # Send file returns mock messages
     mock_client.send_file.side_effect = [
@@ -835,6 +836,7 @@ async def test_fmp4_duration_inflated_dynamic_replanning_self_healing():
     )
     mock_client = AsyncMock()
     mock_client.delete_messages = AsyncMock()
+    mock_client.get_messages = AsyncMock(return_value=[None])
 
     mock_client.send_file.side_effect = [
         MagicMock(id=101),  # Initial plan part 1
@@ -1487,7 +1489,7 @@ async def test_replan_fmp4_rollback_failure_preserves_checkpoint_and_raises_retr
             last_part_exc=PartOversizeError(1, 200, 100, "oversize"),
             get_fresh_url=AsyncMock(return_value="https://cdn.test/new"),
             item_id="fid",
-            task_store=MagicMock(clear_part_checkpoint=AsyncMock()),
+            task_store=AsyncMock(),
         )
 
     assert exc_info.value.retry_after == 33.0
@@ -1498,7 +1500,9 @@ async def test_replan_fmp4_rollback_failure_preserves_checkpoint_and_raises_retr
 async def test_oversize_rollback_clears_checkpoint_before_cancelled_refresh():
     from app.core.pipeline.engines.pikpak import fmp4 as pik_fmp4
 
-    store = MagicMock(clear_part_checkpoint=AsyncMock())
+    store = AsyncMock()
+    client = AsyncMock()
+    client.get_messages.return_value = [None]
     delivered = [101]
 
     async def cancelled_refresh():
@@ -1507,7 +1511,7 @@ async def test_oversize_rollback_clears_checkpoint_before_cancelled_refresh():
 
     with pytest.raises(asyncio.CancelledError):
         await pik_fmp4.replan_fmp4_after_oversize(
-            AsyncMock(),
+            client,
             PublishContext(task_id="task", target_chat_id=-1001),
             MagicMock(),
             [],
@@ -1591,6 +1595,7 @@ async def test_fmp4_checkpoint_signature_rejects_degraded_blind_split_same_part_
         ch_blind.aclose = AsyncMock()
         client = MagicMock()
         client.delete_messages = AsyncMock()
+        client.get_messages = AsyncMock(return_value=[None])
 
         with patch("app.core.pipeline.engines.pikpak.split_loop._inter_part_breathing_delay", new_callable=AsyncMock):
             outcome = await execute_split_loop(
@@ -1638,9 +1643,10 @@ async def test_fmp4_checkpoint_signature_rejects_degraded_blind_split_same_part_
                 reporter=MagicMock(),
             )
         ch_blind2.stream_part.assert_not_awaited()
-        assert await get_saved_checkpoints("t_fmp4_sig", "fid_sig", "fmp4", 2, threshold, plan_signature=kf_sig) == {
-            1: 333
-        }
+        client_fail.get_messages = AsyncMock(return_value=[MagicMock(id=333)])
+        assert await get_saved_checkpoints(
+            "t_fmp4_sig", "fid_sig", "fmp4", 2, threshold, plan_signature=kf_sig, client=client_fail, chat_id=-1001
+        ) == {1: 333}
     finally:
         TaskQueueRepository.delete("t_fmp4_sig")
 

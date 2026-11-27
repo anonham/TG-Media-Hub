@@ -28,6 +28,7 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 import pytest
 
 from app.core.pipeline.engines import PikPakStreamTransportEngine
+from app.core.pipeline.engines.part_delivery import UnconfirmedPartError
 from app.core.pipeline.models import BreathingPolicy, PublishContext, PublishItem, TransportOutcome
 from app.core.pipeline.utils import get_meta_path
 from app.core.stream_chunk_provider import BaseChunkProvider
@@ -564,13 +565,13 @@ async def test_vsse_atomic_rollback_on_failure():
     ):
         mock_upload.side_effect = [MagicMock(), MagicMock()]
 
-        with pytest.raises(RuntimeError) as exc_info:
+        with pytest.raises(UnconfirmedPartError) as exc_info:
             await engine.send_item(item, ctx)
 
-        assert "Telegram network connection dropped" in str(exc_info.value)
+        assert "Telegram network connection dropped" in str(exc_info.value.__cause__)
 
-        # Atomic rollback verification: Part 1 message 101 must be physically deleted
-        mock_client.delete_messages.assert_awaited_once_with(ctx.target_chat_id, [101])
+        # A lost acknowledgement must retain earlier receipts and the uncertain send.
+        mock_client.delete_messages.assert_not_awaited()
 
 
 # -----------------------------------------------------------------------------
@@ -1014,7 +1015,7 @@ async def test_vsse_send_file_flood_wait_exhaustion_rollback():
             await engine.send_item(item, ctx)
 
         # Rollback deleted message 101
-        mock_client.delete_messages.assert_awaited_once_with(ctx.target_chat_id, [101])
+        mock_client.delete_messages.assert_not_awaited()
 
 
 # -----------------------------------------------------------------------------
@@ -1190,17 +1191,17 @@ async def test_capture_on_vsse_failure_marks_rollback_and_residue(monkeypatch):
         patch("app.core.stream_chunk_provider.PikPakStreamChunkProvider", return_value=mock_provider),
         patch("app.core.fast_telethon.upload_file_parallel", new=_drive_tee_upload_factory(upload_kwargs)),
         _no_fallback_mock(engine),
-        pytest.raises(RuntimeError, match="send_file boom"),
+        pytest.raises(UnconfirmedPartError),
     ):
         await engine.send_item(item, ctx)
 
-    mock_client.delete_messages.assert_awaited_once_with(ctx.target_chat_id, [301])
+    mock_client.delete_messages.assert_not_awaited()
 
     root = os.path.join(settings.E2E_CAPTURE_DIR, ctx.task_id, item.item_id)
     with open(os.path.join(root, "manifest.json"), encoding="utf-8") as f:
         manifest = json.load(f)
 
-    assert manifest["rolled_back"] is True  # E3: 已发消息被物理删除
+    assert manifest["rolled_back"] is False
     sent = [e for e in manifest["parts"] if e["status"] == "sent"]
     failed = [e for e in manifest["parts"] if e["status"] == "failed"]
     assert len(sent) == 1 and sent[0]["msg_id"] == 301

@@ -1216,7 +1216,7 @@ async def test_skip_current_file_rejects_concurrent_retry_before_writes(monkeypa
     ensure_slot.assert_not_awaited()
     assert not PublishHistoryRepository.is_published("-100123", "", 0, source_type="pikpak", remote_file_id="fid_1")
 
-    # 2. 在 _ensure_skip_placeholder_slot await 期间任务被重试 -> 提交阶段原子拒绝 409, 不写历史/skipped_files
+    # 2. 发卡期间重试，已经提交的跳过记录对重试可见
     monkeypatch.setattr(TaskQueueRepository, "get_by_id_async", orig_get)
     task_id2 = "skip_retry_race_during_slot"
     TaskQueueRepository.create(
@@ -1234,11 +1234,9 @@ async def test_skip_current_file_rejects_concurrent_retry_before_writes(monkeypa
         return 888
 
     monkeypatch.setattr("app.services.task_lifecycle_service._ensure_skip_placeholder_slot", mutate_during_slot)
-    with pytest.raises(HTTPException) as exc2:
-        await TaskLifecycleService.skip_current_file(task_id2, SkipCurrentFileRequest(file_id="fid_2"))
-    assert exc2.value.status_code == 409
-    assert not PublishHistoryRepository.is_published("-100123", "", 0, source_type="pikpak", remote_file_id="fid_2")
-    assert not (TaskQueueRepository.get_by_id(task_id2)["params"].get("skipped_files") or [])
+    await TaskLifecycleService.skip_current_file(task_id2, SkipCurrentFileRequest(file_id="fid_2"))
+    assert PublishHistoryRepository.is_published("-100123", "", 0, source_type="pikpak", remote_file_id="fid_2")
+    assert len(TaskQueueRepository.get_by_id(task_id2)["params"]["skipped_files"]) == 1
 
 
 @pytest.mark.asyncio

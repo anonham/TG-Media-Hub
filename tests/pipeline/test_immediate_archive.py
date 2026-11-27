@@ -1536,3 +1536,82 @@ async def test_pikpak_snapshot_source_dedups_before_5000_cap():
     assert ctx2.expansion_truncated is True
     assert ctx2.expansion_limit == 5000
     m_notify2.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("returned_messages", [[SimpleNamespace(id=101), None], [SimpleNamespace(id=101)]])
+async def test_send_album_segment_missing_msg_id_preserves_pending_delivery(returned_messages):
+    """相册部分成员缺失消息 ID 时，仅释放并记录已确认成员，未确认成员留在 pending_album_delivery。"""
+    from app.core.pipeline.engines.album_delivery import send_album_segment
+    from app.db.publish_repository import PublishHistoryRepository
+
+    task_id = f"t_album_miss_{len(returned_messages)}"
+    TaskQueueRepository.create(task_id, "pikpak_publish", {"target_channel": "-1001"})
+    try:
+        items = [
+            PublishItem(item_id="fid_1", name="a.jpg", size_bytes=10, parent_folder_id="p1", source_type="pikpak"),
+            PublishItem(item_id="fid_2", name="b.jpg", size_bytes=20, parent_folder_id="p1", source_type="pikpak"),
+        ]
+        segment = [(0, "h1"), (1, "h2")]
+        client = MagicMock()
+        client.send_file = AsyncMock(return_value=returned_messages)
+        ctx = PublishContext(task_id=task_id, target_chat_id="-1001", source_type="pikpak")
+
+        await send_album_segment(client, ctx, items, segment, is_pikpak=True, single_caption="")
+
+        saved = TaskQueueRepository.get_by_id(task_id)
+        assert saved["params"]["pending_album_delivery"] == ["fid_2"]
+        assert PublishHistoryRepository.is_published("-1001", "", 0, source_type="pikpak", remote_file_id="fid_1")
+        assert not PublishHistoryRepository.is_published("-1001", "", 0, source_type="pikpak", remote_file_id="fid_2")
+
+        with pytest.raises(UnconfirmedAlbumError):
+            await send_album_segment(client, ctx, items, segment, is_pikpak=True, single_caption="")
+    finally:
+        TaskQueueRepository.delete(task_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("is_pikpak", [False, True])
+async def test_record_success_offloads_history_write_to_worker_thread(is_pikpak):
+    """_record_success 写入发布历史与本地哈希查询均卸载至工作线程，不阻塞事件循环。"""
+    import threading
+
+    from app.core.pipeline.pipeline import PublishPipeline
+    from app.core.pipeline.runtime import BatchState, Counters
+    from app.db.download_repository import DownloadHistoryRepository
+    from app.db.publish_repository import PublishHistoryRepository
+
+    loop_tid = threading.get_ident()
+    hash_threads: list[int] = []
+    record_threads: list[int] = []
+
+    def fake_get_hash(_path):
+        hash_threads.append(threading.get_ident())
+        return "abc123"
+
+    def fake_record(*_args, **_kwargs):
+        record_threads.append(threading.get_ident())
+        return True
+
+    pipeline = PublishPipeline(source=MagicMock(), engine=MagicMock(), cleanup=MagicMock(), notifier=MagicMock())
+    item = PublishItem(
+        item_id="fid_pk" if is_pikpak else "/tmp/local.mp4",
+        name="local.mp4",
+        size_bytes=123,
+        parent_folder_id="root",
+        source_type="pikpak" if is_pikpak else "local",
+    )
+    ctx = PublishContext(task_id="", target_chat_id="-1001", source_type="pikpak" if is_pikpak else "local")
+    counters = Counters(total_files=1)
+    b = BatchState()
+
+    with (
+        patch.object(DownloadHistoryRepository, "get_hash_by_path", side_effect=fake_get_hash),
+        patch.object(PublishHistoryRepository, "record", side_effect=fake_record),
+    ):
+        await pipeline._record_success(item, ctx, counters, b, msg_id=777, is_pikpak=is_pikpak, history_recorded=False)
+
+    assert len(record_threads) == 1 and record_threads[0] != loop_tid
+    if not is_pikpak:
+        assert len(hash_threads) == 1 and hash_threads[0] != loop_tid
+        assert record_threads[0] == hash_threads[0]

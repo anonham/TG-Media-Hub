@@ -1865,3 +1865,23 @@ def test_required_alias_skips_empty_strings_and_empty_pikpak_fid_not_completed()
         }
     )
     assert completed is False
+
+
+@pytest.mark.parametrize("raw_basic_group", [" -123 ", "-123", -123])
+def test_forward_strategy_resume_parses_whitespace_basic_group_id(monkeypatch, raw_basic_group):
+    from app.services.forward_service import ForwardService
+
+    compute_mock = MagicMock(return_value=(None, "covered"))
+    monkeypatch.setattr(ForwardService, "compute_resume_start", compute_mock)
+
+    completed, patch_data, msg = ForwardChannelStrategy().validate_and_prepare_resume(
+        {"params": {"source_chat": raw_basic_group, "target_chat": "-100999"}}
+    )
+    assert (completed, patch_data, msg) == (False, {"dry_run": False}, "")
+    compute_mock.assert_not_called()
+
+    completed_ch, _patch_ch, _msg_ch = ForwardChannelStrategy().validate_and_prepare_resume(
+        {"params": {"source_chat": " -1001234567890 ", "target_chat": "-100999"}}
+    )
+    assert completed_ch is True
+    compute_mock.assert_called_once()

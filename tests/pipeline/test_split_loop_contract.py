@@ -684,3 +684,57 @@ async def test_split_loop_delete_messages_flood_wait_preserves_retry_after():
     assert exc_info.value.retry_after == 42.0
     assert exc_info.value.__cause__ is fw
     m_clr.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_send_volume_file_forbidden_releases_receipt_and_reraises() -> None:
+    """分卷发送遇 ForbiddenError 时必须释放 -1 哨兵 (receipt(0)) 并原样上抛."""
+    from unittest.mock import call
+
+    from telethon.errors import ForbiddenError
+
+    from app.core.pipeline.engines.part_delivery import part_receipt_scope, send_volume_file
+
+    receipt = AsyncMock()
+    client = MagicMock()
+    client.send_file = AsyncMock(side_effect=ForbiddenError(request=None, message="CHAT_WRITE_FORBIDDEN"))
+
+    with part_receipt_scope(receipt), pytest.raises(ForbiddenError):
+        await send_volume_file(client, -100123, b"part-bytes")
+
+    assert receipt.await_args_list == [call(-1), call(0)]
+
+
+@pytest.mark.asyncio
+async def test_split_loop_zero_only_delivered_checkpoint_treated_as_undelivered() -> None:
+    """delivered 仅含 msg_id=0 (补偿回滚残留) 时，按未投递处理，不触发 incompatible-plan 或 UnconfirmedPartError."""
+    from app.core.pipeline.engines.pikpak.split_loop import _peek_checkpoint_resume_info
+
+    row = {
+        "params": {
+            "pikpak_part_checkpoints": {
+                "file-0": {
+                    "strategy": "fmp4",
+                    "total_parts": 2,
+                    "threshold": 100,
+                    "plan_signature": "old-sig",
+                    "delivered": {"1": 0},
+                }
+            }
+        }
+    }
+    with patch.object(TaskQueueRepository, "get_by_id_async", new_callable=AsyncMock, return_value=row):
+        forced_parts, msg_ids, sig = await _peek_checkpoint_resume_info("t_zero_cp", "file-0", "vsse", 200)
+        assert (forced_parts, msg_ids, sig) == (None, [], None)
+
+        res = await get_saved_checkpoints(
+            "t_zero_cp",
+            "file-0",
+            "vsse",
+            2,
+            200,
+            plan_signature="new-sig",
+            client=MagicMock(),
+            chat_id=-100123,
+        )
+        assert res == {}

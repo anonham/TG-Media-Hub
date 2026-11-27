@@ -1260,3 +1260,90 @@ async def test_delete_task_preserves_partial_cleanup_results_on_failure(monkeypa
     assert len(res["files_skipped"]) == 1
     assert res["files_skipped"][0]["path"] == "/tmp/a.meta"
     assert "disk error" in res["files_skipped"][0]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_ensure_skip_placeholder_slot_releases_on_rejection_and_keeps_on_unknown(monkeypatch):
+    from telethon.errors import ForbiddenError
+
+    from app.db.publish_repository import PlaceholderSlotRepository
+    from app.services.task_lifecycle_service import _ensure_skip_placeholder_slot
+
+    fake_client = MagicMock()
+    fake_acc = MagicMock(account_name="acc1", account_id=1, client=fake_client)
+    fake_acc.is_ready.return_value = True
+    monkeypatch.setattr("app.services.task_lifecycle_service.client_manager.get_account", lambda _aid: fake_acc)
+    monkeypatch.setattr("app.services.task_lifecycle_service.load_static_poster", lambda: b"")
+    monkeypatch.setattr("app.services.task_lifecycle_service.resolve_entity", AsyncMock(return_value=-100123))
+
+    # 1. Telegram 明确拒绝 -> 释放未激活的 sending 槽
+    fake_client.send_message = AsyncMock(side_effect=ForbiddenError(request=None, message="CHAT_WRITE_FORBIDDEN"))
+    msg_id_1 = await _ensure_skip_placeholder_slot(
+        "skip_rej_1", 1, "-100123", "pikpak://p1/rej.mp4", "rej.mp4", 100, "跳过"
+    )
+    assert msg_id_1 == 0
+    assert PlaceholderSlotRepository.get_by_identity("-100123", "pikpak://p1/rej.mp4", 100) is None
+
+    # 2. 发送结果未知 -> 保留 sending 槽供核对
+    fake_client.send_message = AsyncMock(side_effect=RuntimeError("network drop"))
+    msg_id_2 = await _ensure_skip_placeholder_slot(
+        "skip_unk_2", 1, "-100123", "pikpak://p1/unk.mp4", "unk.mp4", 200, "跳过"
+    )
+    assert msg_id_2 == 0
+    kept = PlaceholderSlotRepository.get_by_identity("-100123", "pikpak://p1/unk.mp4", 200)
+    assert kept is not None and kept["state"] == "sending"
+
+
+@pytest.mark.asyncio
+async def test_skip_current_file_rejects_and_rolls_back_when_already_published(monkeypatch):
+    task_a = "skip_conflict_a"
+    TaskQueueRepository.create(
+        task_a,
+        "pikpak_publish",
+        {
+            "target_channel": "-100123",
+            "remote_files": [{"file_id": "fid_dup", "name": "dup.mp4", "size_bytes": 100, "parent_folder_id": "p1"}],
+            "pikpak_part_checkpoints": {"fid_dup": {"strategy": "fmp4", "delivered": {"1": 111}}},
+        },
+        status="paused",
+    )
+    ensure_slot = AsyncMock(return_value=0)
+    monkeypatch.setattr("app.services.task_lifecycle_service._ensure_skip_placeholder_slot", ensure_slot)
+    monkeypatch.setattr("app.services.task_lifecycle_service.task_scheduler.is_task_running", lambda _tid: False)
+
+    orig_get = TaskQueueRepository.get_by_id_async
+    calls = 0
+
+    async def publish_concurrently(tid):
+        nonlocal calls
+        calls += 1
+        row = await orig_get(tid)
+        if calls == 2:
+            PublishHistoryRepository.record(
+                "-100123",
+                "pikpak://p1/dup.mp4",
+                100,
+                "",
+                source_type="pikpak",
+                remote_file_id="fid_dup",
+                tg_message_id=9999,
+                task_id="task_b",
+            )
+        return row
+
+    monkeypatch.setattr(TaskQueueRepository, "get_by_id_async", publish_concurrently)
+    try:
+        with pytest.raises(HTTPException) as exc_info:
+            await TaskLifecycleService.skip_current_file(task_a, SkipCurrentFileRequest(file_id="fid_dup"))
+        assert exc_info.value.status_code == 409
+        ensure_slot.assert_not_awaited()
+
+        receipt = PublishHistoryRepository.get_published_info(
+            "-100123", "", 0, source_type="pikpak", remote_file_id="fid_dup"
+        )
+        assert receipt is not None and receipt.tg_message_id == 9999 and receipt.task_id == "task_b"
+        row_a = TaskQueueRepository.get_by_id(task_a)
+        assert not row_a["params"].get("skipped_files")
+        assert "fid_dup" in row_a["params"].get("pikpak_part_checkpoints", {})
+    finally:
+        TaskQueueRepository.delete(task_a)

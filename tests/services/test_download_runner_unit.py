@@ -909,3 +909,44 @@ async def test_download_terminal_helpers_skip_side_effects_when_guard_misses():
     mock_prog.assert_not_awaited()
     mock_log.assert_not_awaited()
     mock_bcast.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", ["completed", "failed"])
+async def test_download_terminal_pause_conflict_marks_exit_and_raises_paused(terminal):
+    """终态写入遇暂停冲突时先标记 executor_exiting，并转交暂停收尾；取消态不得抛 TaskPausedError。"""
+    task_id = f"dl_pause_term_{terminal}"
+    state = _DownloadRunState(total_items=1, cumulative_done_bytes=128)
+    active_task_controls[task_id] = {"paused": True, "cancelled": False}
+
+    with (
+        patch(
+            "app.services.download_runner.TaskQueueRepository.update_status_async", new=AsyncMock(return_value=False)
+        ),
+        patch("app.services.download_runner.mark_task_executor_exit") as mock_exit,
+        patch("app.services.download_runner.mark_task_pause_exit") as mock_pause_exit,
+        pytest.raises(TaskPausedError),
+    ):
+        if terminal == "completed":
+            await _finalize_download_completed(task_id, state, "全部下载完成")
+        else:
+            await _finalize_failed_task(task_id, [("item1", "err")])
+
+    mock_exit.assert_called_once_with(task_id)
+    mock_pause_exit.assert_called_once_with(task_id)
+
+    active_task_controls[task_id] = {"paused": False, "cancelled": True}
+    with (
+        patch(
+            "app.services.download_runner.TaskQueueRepository.update_status_async", new=AsyncMock(return_value=False)
+        ),
+        patch("app.services.download_runner.mark_task_executor_exit") as mock_exit_cancel,
+        patch("app.services.download_runner.mark_task_pause_exit") as mock_pause_cancel,
+    ):
+        if terminal == "completed":
+            await _finalize_download_completed(task_id, state, "全部下载完成")
+        else:
+            await _finalize_failed_task(task_id, [("item1", "err")])
+
+    mock_exit_cancel.assert_called_once_with(task_id)
+    mock_pause_cancel.assert_not_called()

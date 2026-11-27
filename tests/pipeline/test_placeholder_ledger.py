@@ -1969,3 +1969,28 @@ async def test_admission_finalization_does_not_terminalize_retried_slots(retry_a
     elif retry_at == "edit":
         client.edit_message.assert_awaited_once()
         assert TaskQueueRepository.get_by_id(task_id)["status"] == "queued"
+
+
+def test_cas_acquire_edit_blocks_cross_task_failed_terminal_and_cleanup_deletes_it():
+    """failed_terminal 仅限同任务原地复活，禁止跨任务复活；任务删除清理后不再残留可复活槽。"""
+    TaskQueueRepository.create("t_owner_1", "publish_folder", {"target_channel": "-100123"})
+    TaskQueueRepository.create("t_other_2", "publish_folder", {"target_channel": "-100123"})
+    try:
+        slot = _mk("t_owner_1", path="/tv/cross_task.mkv", size=4096)
+        assert Slots.mark_failed_terminal(slot, "终端失败")
+
+        assert Slots.cas_acquire_edit("-100123", "/tv/cross_task.mkv", 4096, task_id="t_other_2") is False
+        assert Slots.get_by_id(slot)["state"] == "failed_terminal"
+
+        assert Slots.cas_acquire_edit("-100123", "/tv/cross_task.mkv", 4096, task_id="t_owner_1") is True
+        assert Slots.get_by_id(slot)["state"] == "editing"
+
+        Slots.reset_to_sent(slot)
+        assert Slots.mark_failed_terminal(slot, "再次终态")
+        TaskQueueRepository.delete("t_owner_1")
+
+        assert Slots.get_by_identity("-100123", "/tv/cross_task.mkv", 4096) is None
+        assert Slots.cas_acquire_edit("-100123", "/tv/cross_task.mkv", 4096, task_id="t_other_2") is False
+    finally:
+        TaskQueueRepository.delete("t_owner_1")
+        TaskQueueRepository.delete("t_other_2")

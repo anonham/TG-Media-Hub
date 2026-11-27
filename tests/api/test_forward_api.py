@@ -516,3 +516,31 @@ def test_forward_api_duplicate_guard_rejects_same_username_after_canonical_pinni
 def test_forward_history_pagination_bounds(page, limit, expected):
     response = client.get("/api/forward/history", params={"page": page, "limit": limit}, headers=auth_headers())
     assert response.status_code == expected
+
+
+@pytest.mark.asyncio
+async def test_forward_history_canonicalizes_aliases_off_event_loop(monkeypatch):
+    import threading
+
+    from app.api.forward import get_forward_history
+    from app.services.forward_console_service import ForwardConsoleService
+
+    loop_tid = threading.get_ident()
+    canon_threads: list[int] = []
+    query_threads: list[int] = []
+
+    def fake_canon(val):
+        canon_threads.append(threading.get_ident())
+        return f"canon:{val}"
+
+    def fake_query(**_kwargs):
+        query_threads.append(threading.get_ident())
+        return []
+
+    monkeypatch.setattr(ForwardService, "canonicalize_chat_key", staticmethod(fake_canon))
+    monkeypatch.setattr(ForwardConsoleService, "query_history", staticmethod(fake_query))
+
+    res = await get_forward_history(source_chat="@src_alias", target_chat="@tgt_alias")
+    assert res == {"status": "success", "count": 0, "data": []}
+    assert len(canon_threads) == 2 and all(t != loop_tid for t in canon_threads)
+    assert len(query_threads) == 1 and query_threads[0] == canon_threads[0]

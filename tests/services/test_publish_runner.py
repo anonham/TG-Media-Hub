@@ -498,3 +498,19 @@ async def test_finalize_publish_result_preserves_stop_committed_during_diagnosti
     finally:
         active_task_controls.pop(task_id, None)
         TaskQueueRepository.delete(task_id)
+
+
+@pytest.mark.asyncio
+async def test_claim_and_mark_running_rejects_deleted_task(monkeypatch):
+    """调度器托管任务在调度窗口内被删除时，_claim_and_mark_running 必须返回 False 并释放 controls。"""
+    from app.core.runtime import mark_scheduler_managed_executor
+
+    task_id = "pr_deleted_claim"
+    mark_scheduler_managed_executor(task_id)
+    monkeypatch.setattr(pr, "try_claim_executor_entry", lambda _tid: True)
+    try:
+        claimed = await pr._claim_and_mark_running(task_id)
+        assert claimed is False
+        assert active_task_controls[task_id]["scheduler_managed"] is True
+    finally:
+        active_task_controls.pop(task_id, None)

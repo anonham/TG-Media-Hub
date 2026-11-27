@@ -429,6 +429,34 @@ async def test_inspect_download_range_mock(second_batch_fails, album_completed):
 
 
 @pytest.mark.asyncio
+async def test_inspect_download_range_caps_huge_range():
+    """超大消息范围预检按 MAX_INSPECT_RANGE_MESSAGES 截断并显式标记未扫描区间。"""
+    from app.core.client_manager import client_manager
+    from app.services.downloader_service import MAX_INSPECT_RANGE_MESSAGES, DownloaderService
+
+    mock_client = AsyncMock()
+    mock_client.is_connected = MagicMock(return_value=True)
+    mock_entity = MagicMock(title="大范围频道", username="big_chan", noforwards=False, broadcast=True, megagroup=False)
+    mock_client.get_entity = AsyncMock(return_value=mock_entity)
+    mock_client.get_messages = AsyncMock(side_effect=lambda _e, *, ids: [None] * len(ids))
+
+    orig_accounts = dict(client_manager._accounts)
+    seed_default_account(client_manager, client=mock_client)
+    try:
+        res = await DownloaderService.inspect_download_range("big_chan", 1, MAX_INSPECT_RANGE_MESSAGES * 4)
+        assert mock_client.get_messages.await_count == MAX_INSPECT_RANGE_MESSAGES // 100
+        assert res["total_range_messages"] == MAX_INSPECT_RANGE_MESSAGES * 4
+        assert res["history_check_complete"] is False
+        assert res["all_media_downloaded"] is False
+        assert any(
+            f"{MAX_INSPECT_RANGE_MESSAGES + 1}~{MAX_INSPECT_RANGE_MESSAGES * 4}" in w for w in res["warning_messages"]
+        )
+    finally:
+        client_manager._accounts.clear()
+        client_manager._accounts.update(orig_accounts)
+
+
+@pytest.mark.asyncio
 async def test_publish_folder_progress_reporting(tmp_dir):
     from app.core.client_manager import client_manager
     from app.services.publisher_service import PublisherService

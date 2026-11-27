@@ -2393,3 +2393,44 @@ async def test_dry_run_auto_pause_preserves_cancelled_status(monkeypatch):
         assert TaskQueueRepository.get_status(task_id) == "cancelled"
     finally:
         active_task_controls.pop(task_id, None)
+
+
+@pytest.mark.asyncio
+async def test_broadcast_forward_start_returns_false_on_failed_and_aborts_scan(monkeypatch):
+    from app.services import forward_service as service
+
+    task_id = "fwd_start_failed_abort"
+    TaskQueueRepository.create(task_id, "forward_channel", {}, status="failed")
+    try:
+        state_failed = service._ForwardRunState(task_id, "-1001", "-1002", 50, False, False, run_total=10)
+        progress_mock = AsyncMock()
+        monkeypatch.setattr(TaskQueueRepository, "update_progress_async", progress_mock)
+
+        assert await service._broadcast_forward_start(state_failed, 1, 10) is False
+        progress_mock.assert_not_awaited()
+
+        state_direct = service._ForwardRunState(None, "-1001", "-1002", 50, False, False, run_total=10)
+        assert await service._broadcast_forward_start(state_direct, 1, 10) is True
+
+        userbot = MagicMock()
+        userbot.iter_messages = MagicMock(side_effect=AssertionError("不得扫描源频道"))
+        monkeypatch.setattr(service, "_compute_forward_run_total", AsyncMock(return_value=10))
+        monkeypatch.setattr(service, "_log_forward_startup", AsyncMock())
+
+        forwarded = await service.ForwardService._forward_channel_messages_inner(
+            source_chat="-1001",
+            target_chat="-1002",
+            start_id=1,
+            end_id=10,
+            batch_size=50,
+            delay_seconds=0.0,
+            task_id=task_id,
+            full_retransfer=False,
+            dry_run=False,
+            account_id=None,
+            _pre_resolved=(state_failed, userbot, MagicMock(), MagicMock(), 1),
+        )
+        assert forwarded == 0
+        userbot.iter_messages.assert_not_called()
+    finally:
+        TaskQueueRepository.delete(task_id)

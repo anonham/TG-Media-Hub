@@ -1,0 +1,115 @@
+name: Micro-Benchmarks
+
+# Strict SLA verification lives in a dedicated channel: manual dispatch + a weekly
+# advisory drift signal. On shared runners, strict failures are an investigation
+# signal, not a merge gate (scheduled runs always run non-strict).
+
+on:
+  schedule:
+    - cron: "30 2 * * 1" # Weekly, Monday 02:30 UTC (advisory drift signal)
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: "Benchmark suite to run"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - all
+          - iso_bmff
+          - sqlite_logs
+          - vsse_pipeline
+      strict:
+        description: "Advisory only: fail the run if any strict SLA threshold is exceeded (investigation signal, not a merge gate)"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  micro-benchmarks:
+    name: Run Micro-Benchmarks (${{ inputs.suite || 'all' }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # On schedule, inputs.* are null; normalize through BENCH_SUITE or both
+      # benchmark steps would silently skip.
+      BENCH_SUITE: ${{ inputs.suite || 'all' }}
+      TG_API_ID: "1"
+      TG_API_HASH: dummy
+      TG_BOT_TOKENS: "1:dummy"
+      API_KEY: testkey
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Run ISO-BMFF micro-benchmark
+        if: env.BENCH_SUITE == 'all' || env.BENCH_SUITE == 'iso_bmff'
+        env:
+          STRICT_MODE: ${{ inputs.strict }}
+        run: |
+          flags=()
+          if [ "${STRICT_MODE}" = "true" ]; then
+            flags+=("--strict")
+            echo "> NOTE: strict SLA on shared runners is an investigation signal, not a merge gate." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "### ISO-BMFF Micro-Benchmark" >> "$GITHUB_STEP_SUMMARY"
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          uv run python scripts/benchmarks/bench_iso_bmff.py "${flags[@]}" --json-file bench_iso_bmff.json | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run SQLite append_log micro-benchmark
+        if: env.BENCH_SUITE == 'all' || env.BENCH_SUITE == 'sqlite_logs'
+        env:
+          STRICT_MODE: ${{ inputs.strict }}
+        run: |
+          flags=()
+          if [ "${STRICT_MODE}" = "true" ]; then
+            flags+=("--strict")
+            echo "> NOTE: strict SLA on shared runners is an investigation signal, not a merge gate." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "### SQLite Log Append Micro-Benchmark" >> "$GITHUB_STEP_SUMMARY"
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          uv run python scripts/benchmarks/bench_sqlite_logs.py "${flags[@]}" --json-file bench_sqlite_logs.json | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run VSSE pipeline micro-benchmark
+        if: env.BENCH_SUITE == 'all' || env.BENCH_SUITE == 'vsse_pipeline'
+        env:
+          STRICT_MODE: ${{ inputs.strict }}
+        run: |
+          flags=()
+          if [ "${STRICT_MODE}" = "true" ]; then
+            flags+=("--strict")
+            echo "> NOTE: strict SLA on shared runners is an investigation signal, not a merge gate." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "### VSSE Pipeline Micro-Benchmark" >> "$GITHUB_STEP_SUMMARY"
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          uv run python scripts/benchmarks/bench_vsse_pipeline.py "${flags[@]}" --json-file bench_vsse_pipeline.json | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      # JSON artifacts for cross-run manual trend comparison (lightweight ASV/CodSpeed
+      # alternative); upload best-effort even on failure for forensics.
+      - name: Upload benchmark JSON artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: micro-benchmarks-json-${{ github.run_id }}
+          path: bench_*.json
+          if-no-files-found: ignore
+          retention-days: 90

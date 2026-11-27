@@ -1,0 +1,4 @@
+# Semgrep ignore file
+# Exclude tests and helper/benchmark scripts from SAST static analysis
+tests/
+scripts/

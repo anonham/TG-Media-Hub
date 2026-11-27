@@ -1,0 +1,43 @@
+services:
+  tg-media-hub:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tg-media-hub
+    restart: unless-stopped
+    stop_grace_period: 30s
+    # 2C2G 宿主机内存护栏 (PikPak 环形缓存/预读预算见 docs/architecture/STREAMING_AND_SPLITTING.md)
+    mem_limit: 1536m
+    env_file:
+      - .env
+    environment:
+      # 容器内监听虚拟网卡，并显式应用公网入口认证策略。宿主机端口映射仍绑定回环。
+      HOST: "0.0.0.0"
+      CONSOLE_REQUIRE_API_KEY: "true"
+      # 显式声明固化语义 (env_file 已加载 .env): CLI 凭据目录必须落在 /app/data 命名卷, Token 仅透传不落盘
+      PIKPAK_DIR: /app/data/.pikpak
+      PIKPAK_META_DIR: /app/data/upload_meta
+      PIKPAK_TOKEN: ${PIKPAK_TOKEN:-}
+    ports:
+      # 安全加固：收紧端口绑定为本地 Loopback (127.0.0.1)，防止未授权全网裸露
+      - "127.0.0.1:${PORT:-8500}:${PORT:-8500}"
+    volumes:
+      # 持久化卷 1: SQLite 数据库、系统日志与 Session 密钥文件 (/app/data)
+      - tg_data:/app/data
+      # 持久化卷 2: 本地下载与转存媒体暂存目录 (/app/downloads)
+      - tg_downloads:/app/downloads
+    security_opt:
+      # 安全加固：禁止容器内进程提权，配合非特权 appuser (UID 10001)
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8500/\")'"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  tg_data:
+    name: tg-media-hub_data
+  tg_downloads:
+    name: tg-media-hub_downloads
+

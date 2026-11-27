@@ -6,6 +6,7 @@ from typing import Any
 from app.config import settings
 from app.core.client_manager import client_manager
 from app.core.media_sniff import is_supported_local_media
+from app.core.path_utils import walk_publish_files
 from app.core.pipeline.models import (
     OVERSIZE_POLICY_SKIP_AND_REPORT,
     OVERSIZE_POLICY_SPLIT,
@@ -66,7 +67,7 @@ class PublisherService:
         audios_size_bytes = 0
 
         # 全量遍历以捕获媒体与非媒体
-        for root, _, files in os.walk(folder_path):
+        for root, files in walk_publish_files(folder_path):
             for file in files:
                 total_scanned_files += 1
                 full_path = os.path.join(root, file)

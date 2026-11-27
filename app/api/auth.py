@@ -467,7 +467,19 @@ async def verify_websocket_auth(websocket: WebSocket) -> bool:
 
     expected_key = settings.API_KEY
     if not expected_key:
-        if not is_local_request(websocket):
+        origins = websocket.headers.getlist("origin")
+        server = websocket.scope.get("server")
+        port = server[1] if server else settings.PORT
+        local_origins = {f"http://{host}:{port}" for host in ("localhost", "127.0.0.1", "[::1]")}
+        if port == 80:
+            local_origins.update(("http://localhost", "http://127.0.0.1", "http://[::1]"))
+        # 无 Origin 的本地原生客户端沿用直连认证。浏览器仅允许明确的 HTTP(S) 来源。
+        origin_allowed = not origins or (
+            len(origins) == 1
+            and origins[0].startswith(("http://", "https://"))
+            and (origins[0] in local_origins or origins[0] in settings.CORS_ORIGINS)
+        )
+        if not is_local_request(websocket) or not origin_allowed:
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
             return False
         return True

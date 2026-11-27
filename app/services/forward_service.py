@@ -23,6 +23,7 @@ from app.core.entity_resolver import (
     resolve_canonical_chat_key,
 )
 from app.core.intervals import compute_gaps
+from app.core.redact import redact_telegram_invites
 from app.core.runtime import mark_task_pause_exit, release_runner_controls, try_claim_executor_entry
 from app.core.scheduler import TaskCancelledError, TaskPausedError
 from app.core.session_errors import is_session_invalid_error, report_session_invalid
@@ -403,7 +404,7 @@ class ForwardService:
             await asyncio.to_thread(_record_resolved_peer_aliases, target_entity, str(state.parsed_target), target_chat)
 
         client_account_id = state.client_account_id if state.client_account_id is not None else current_account_id
-        await _log_forward_startup(state, source_chat, target_chat, batch_size, delay_seconds)
+        await _log_forward_startup(state, batch_size, delay_seconds)
 
         # 2. 计算本次任务的进度分母 run_total (任务范围消息数口径) 并立刻更新任务状态为 running
         state.run_total = await _compute_forward_run_total(userbot, source_entity, start_id, end_id)
@@ -505,6 +506,10 @@ def _record_resolved_peer_aliases(entity: Any, canonical_key: str, *raw_inputs: 
 
 async def _log_task_event(state: _ForwardRunState, content: str, level: str = "INFO") -> None:
     """任务级明细统一落 task_logs 并经 append_log_async 广播 WS, 系统日志仅留 debug 追踪 (避免刷爆环形缓冲)"""
+    content = redact_telegram_invites(content)
+    for peer in (state.parsed_source, state.parsed_target):
+        if isinstance(peer, str) and peer.startswith("+"):
+            content = content.replace(peer, "[私密邀请]")
     logger.debug("[%s] [Task %s] %s", level, state.task_id, content)
     if state.task_id:
         await TaskQueueRepository.append_log_async(state.task_id, f"[{level}] {content}")
@@ -1153,13 +1158,11 @@ def _build_iter_range_kwargs(start_id: int | None, end_id: int | None) -> dict:
     return kwargs
 
 
-async def _log_forward_startup(
-    state: _ForwardRunState, source_chat: str, target_chat: str, batch_size: int, delay_seconds: float
-) -> None:
+async def _log_forward_startup(state: _ForwardRunState, batch_size: int, delay_seconds: float) -> None:
     """启动横幅: 引擎初始化 + 源/目标解析 + 运行配置 (任务日志面)"""
     await _log_task_event(state, "🚀 开始初始化云端极速转发引擎 (防风控二分高鲁棒版本)...")
-    await _log_task_event(state, f"📌 源频道/群组: {source_chat} (解析后: {state.parsed_source})")
-    await _log_task_event(state, f"📌 目标频道/群组: {target_chat} (解析后: {state.parsed_target})")
+    await _log_task_event(state, f"📌 源频道/群组: {state.parsed_source}")
+    await _log_task_event(state, f"📌 目标频道/群组: {state.parsed_target}")
     await _log_task_event(
         state, f"⚙️ 运行配置: 批次上限 {batch_size} 条 | 基准发包延迟 {delay_seconds}s | 纯净过滤+二分隔离: 开启"
     )

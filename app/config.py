@@ -108,6 +108,8 @@ class Settings:
                 "检测到已弃用的 TG_API_KEY 环境变量且未设置 API_KEY: 自本版本起 TG_API_KEY 不再生效,"
                 "请将 .env 中的 TG_API_KEY 改名为 API_KEY 后重启 (防止鉴权静默降级为免认证)"
             )
+        if self.SECRET_KEY and self.SECRET_KEY == self.API_KEY:
+            raise RuntimeError("SECRET_KEY 与 API_KEY 必须独立配置")
         if self.SPLIT_STRATEGY not in self.ALLOWED_SPLIT_STRATEGIES:
             raise RuntimeError(f"非法切片策略: {self.SPLIT_STRATEGY}，允许的选项: {self.ALLOWED_SPLIT_STRATEGIES}")
         if self.WAL_CHECKPOINT_INTERVAL_SECONDS <= 0:

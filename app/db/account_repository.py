@@ -192,6 +192,9 @@ class AccountRepository:
             if existing_uid != expected_user_id:
                 raise ValueError("账号绑定 Telegram 用户状态已变更，当前登录挑战已失效")
 
+            if existing_uid is not None and existing_uid != user_id:
+                raise ValueError("登录的 Telegram 身份与已绑定账号不一致")
+
             if expected_phone is not None and (row["phone"] or "") != expected_phone:
                 raise ValueError("登录期间账号绑定手机号已变更，拒绝完成登录")
             if expected_session_file is not None and (row["session_file"] or "") != expected_session_file:
@@ -300,7 +303,12 @@ class AccountRepository:
     def delete(account_id: int):
         with db_immediate_tx() as cursor:
             # 级联置空: 显式将绑定该账号的任务 account_id 置 NULL，杜绝悬挂外键
-            cursor.execute("UPDATE task_queue SET account_id = NULL WHERE account_id = ?", (account_id,))
+            # 保留调度时所需的原账号，重试/恢复也不能把已移除的账号当作自动选取。
+            cursor.execute(
+                "UPDATE task_queue SET params_json = json_set(COALESCE(params_json, '{}'), '$._deleted_account_id', "
+                "account_id), account_id = NULL, updated_at = ? WHERE account_id = ?",
+                (time.time(), account_id),
+            )
             cursor.execute("DELETE FROM tg_accounts WHERE id = ?", (account_id,))
             cursor.execute("DELETE FROM system_settings WHERE key = ?", (f"{_HANDOVER_KEY_PREFIX}{account_id}",))
 

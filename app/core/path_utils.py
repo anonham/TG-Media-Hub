@@ -5,6 +5,7 @@
 """
 
 import os
+from collections.abc import Iterator
 from pathlib import Path
 
 from app.config import settings
@@ -91,3 +92,29 @@ def validate_safe_folder_path(folder_path: str) -> str:
         raise ValueError("检测到敏感凭据或配置目录，已安全拦截")
 
     return real_path
+
+
+def walk_publish_files(folder_path: str) -> Iterator[tuple[str, list[str]]]:
+    """巡检和实际发布共用目录边界；在 os.walk 进入子目录前剪枝。"""
+    base = Path(validate_safe_folder_path(folder_path))
+    for root, dirs, files in os.walk(base):
+        safe_dirs = []
+        for name in dirs:
+            directory = Path(root, name)
+            try:
+                if directory.is_symlink() or directory.is_junction():
+                    continue
+                if Path(validate_safe_folder_path(str(directory))).is_relative_to(base):
+                    safe_dirs.append(name)
+            except (OSError, ValueError):
+                continue
+        dirs[:] = safe_dirs
+        safe_files = []
+        for name in files:
+            path = Path(root, name)
+            try:
+                if not os.path.islink(path) and path.is_file() and path.resolve().is_relative_to(base):
+                    safe_files.append(name)
+            except (OSError, RuntimeError):
+                continue
+        yield root, safe_files

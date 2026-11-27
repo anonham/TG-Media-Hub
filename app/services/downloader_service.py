@@ -577,8 +577,7 @@ class DownloaderService:
         elif hasattr(entity, "participants_count"):
             channel_type = "Chat"
 
-        msg_ids = list(range(start_id, end_id + 1))
-        total_range = len(msg_ids)
+        total_range = end_id - start_id + 1
 
         messages_with_media = 0
         text_only_messages = 0
@@ -599,8 +598,8 @@ class DownloaderService:
 
         # 分批检索消息元数据 (单次最多 100 条)
         chunk_size = 100
-        for i in range(0, total_range, chunk_size):
-            sub_ids = msg_ids[i : i + chunk_size]
+        for first_id in range(start_id, end_id + 1, chunk_size):
+            sub_ids = list(range(first_id, min(first_id + chunk_size, end_id + 1)))
             try:
                 msgs = await asyncio.wait_for(userbot.get_messages(entity, ids=sub_ids), timeout=15.0)
                 if msgs is None or len(msgs) != len(sub_ids):

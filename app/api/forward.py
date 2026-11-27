@@ -2,8 +2,9 @@ import asyncio
 import logging
 import math
 import uuid
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from app.core.intervals import compute_gaps, merge_intervals, runs_from_ids
 from app.core.scheduler import task_scheduler
@@ -130,14 +131,17 @@ async def get_forward_history(
     source_chat: str | None = None,
     target_chat: str | None = None,
     source_msg_id: int | None = None,
-    page: int = 1,
-    limit: int = 50,
+    page: Annotated[int, Query(ge=1)] = 1,
+    limit: Annotated[int, Query(ge=1, le=500)] = 50,
 ):
-    offset = max(0, (page - 1) * limit)
+    offset = (page - 1) * limit
+    if offset > 2**63 - 1:
+        return {"status": "success", "count": 0, "data": []}
     parsed_source = ForwardService.canonicalize_chat_key(source_chat) if source_chat else None
     parsed_target = ForwardService.canonicalize_chat_key(target_chat) if target_chat else None
 
-    rows = ForwardConsoleService.query_history(
+    rows = await asyncio.to_thread(
+        ForwardConsoleService.query_history,
         source_chat=parsed_source,
         target_chat=parsed_target,
         source_msg_id=source_msg_id,
@@ -180,7 +184,9 @@ async def estimate_forward(req: ForwardEstimateRequest):
         raise HTTPException(status_code=400, detail=f"预估失败: {e}") from e
 
     span_count = end_id - start_id + 1
-    already = ForwardConsoleService.count_processed_in_range(parsed_source, parsed_target, start_id, end_id)
+    already = await asyncio.to_thread(
+        ForwardConsoleService.count_processed_in_range, parsed_source, parsed_target, start_id, end_id
+    )
     to_process = max(0, span_count - already)
     est_batches = math.ceil(to_process / req.batch_size) if to_process > 0 else 0
     return {

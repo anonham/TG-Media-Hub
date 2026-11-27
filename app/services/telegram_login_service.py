@@ -1182,7 +1182,19 @@ class TelegramLoginService:
             raise TelegramLoginError(400, "challenge_stale", "登录挑战凭据缺失，请重新获取验证码")
 
         try:
-            await client.sign_in(phone=ch.target_phone, code=clean_code, phone_code_hash=ch._phone_code_hash)
+            if ch.delivery_channel == "email":
+                request = functions.auth.SignInRequest(
+                    phone_number=ch.target_phone,
+                    phone_code_hash=ch._phone_code_hash,
+                    email_verification=types.EmailVerificationCode(code=clean_code),
+                )
+                authorization = await client(request)
+                if not isinstance(authorization, types.auth.Authorization):
+                    raise TelegramLoginError(400, "identity_mismatch", "该账号需要通过 Telegram 官方客户端完成注册")
+                # 与 Telethon 的 sign_in 保持一致，初始化本地客户端的授权状态。
+                await client._on_login(authorization.user)
+            else:
+                await client.sign_in(phone=ch.target_phone, code=clean_code, phone_code_hash=ch._phone_code_hash)
             return None
         except Exception as exc:
             if "SessionPasswordNeededError" not in type(exc).__name__:

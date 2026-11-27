@@ -1492,6 +1492,11 @@ class TelegramBotClient:
                     self.status = "unauthenticated"
                     BotRepository.update_status(self.bot_id, self.status)
                     return "Bot 未授权或身份信息为空"
+                if getattr(me, "bot", False) is not True or str(me.id) != self.bot_token.partition(":")[0]:
+                    keep_connection = False
+                    self.status = "invalid"
+                    BotRepository.update_status(self.bot_id, self.status)
+                    return "Bot 会话与配置的 Bot 身份不一致"
                 self.dc_id = getattr(client.session, "dc_id", 0) or self.dc_id
                 self.bot_username = getattr(me, "username", None)
                 BotRepository.update_status(self.bot_id, "ready", bot_username=self.bot_username, dc_id=self.dc_id)

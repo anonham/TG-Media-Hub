@@ -21,6 +21,10 @@ _SIGNED_QUERY_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Telegram 邀请链接中的私密凭据，只在日志边界擦除。
+_TELEGRAM_INVITE_RE = re.compile(
+    r"((?:t\.me|telegram\.(?:me|dog))/(?:\+|joinchat/)|tg://join\?invite=)[a-z0-9_-]+", re.IGNORECASE
+)
 # 代理或 HTTP URL 凭证敏感信息擦除 (http://user:pass@host:port -> http://***:***@host:port)
 _URL_USERINFO_RE = re.compile(
     r"([a-zA-Z][a-zA-Z0-9+.-]*://)([^:/?#@\s\"']+):([^/?#@\s\"']+)@",
@@ -28,6 +32,10 @@ _URL_USERINFO_RE = re.compile(
 
 # Python printf 格式化占位符识别 (%s, %.1f, %(key)s, %% 等)
 _PRINTF_SPEC_RE = re.compile(r"%(?:\([^)]+\))?[#0\- +]?(?:\*|\d+)?(?:\.(?:\*|\d+))?[hlL]?[diouxXeEfFgGcrsa%]")
+
+
+def redact_telegram_invites(message: str) -> str:
+    return _TELEGRAM_INVITE_RE.sub(r"\1***", message)
 
 
 def redact_text(s: Any) -> Any:

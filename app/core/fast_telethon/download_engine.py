@@ -86,6 +86,8 @@ async def _download_small_file_direct(
     progress_callback: Callable[..., None] | None,
     is_cancelled: Callable[[], bool] | None,
     is_paused: Callable[[], bool] | None = None,
+    *,
+    expected_size: int = 0,
 ) -> str:
     staging_path: str | None = None
 
@@ -112,11 +114,11 @@ async def _download_small_file_direct(
         if should_stop():
             return out_file_path
         actual_size = breakpoints._verify_small_download_sync(staging_path)
-        if actual_size <= 0:
+        if actual_size <= 0 or (expected_size > 0 and actual_size != expected_size):
             raise DownloadIncompleteError(
                 out_file_path,
                 [0],
-                {0: "小文件下载返回后临时文件不存在或为空"},
+                {0: f"小文件下载长度校验失败: 实际 {actual_size}, 预期 {expected_size or '未知'}"},
                 total_chunks=1,
                 completed_chunks=0,
                 last_clients={0: primary_client},
@@ -883,7 +885,15 @@ async def download_file_parallel(
     # 对于 <= 512KB 的极小文件，直接走单流下载
     if total_bytes <= 512 * 1024 or location is None:
         return await _download_small_file_direct(
-            primary_client, raw_media, location, out_file_path, dc_id, progress_callback, is_cancelled, is_paused
+            primary_client,
+            raw_media,
+            location,
+            out_file_path,
+            dc_id,
+            progress_callback,
+            is_cancelled,
+            is_paused,
+            expected_size=total_bytes,
         )
 
     # 多通道并发分块极速下载 (支持断点续传)

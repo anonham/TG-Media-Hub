@@ -467,6 +467,11 @@ class TaskScheduler:
                     strategy = StrategyRegistry.get_optional(task_type)
                     target_chat = strategy.extract_target_chat(params) if strategy else None
 
+                    if raw_acc_id is None and params.get("_deleted_account_id") is not None:
+                        await self._reject_unavailable_explicit_account(
+                            task_id, params["_deleted_account_id"], deferred=rejected_accounts
+                        )
+                        continue
                     if raw_acc_id is not None:
                         if raw_acc_id <= 0:
                             acc = None

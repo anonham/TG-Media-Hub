@@ -14,6 +14,7 @@ from app.config import settings
 from app.core.entity_resolver import parse_chat_identifier
 from app.core.fast_telethon import SpeedTracker
 from app.core.media_sniff import is_supported_local_media
+from app.core.path_utils import walk_publish_files
 
 logger = logging.getLogger(__name__)
 
@@ -201,24 +202,10 @@ def scan_folder_grouped(folder_path: str) -> dict[str, list[str]]:
     if not os.path.exists(folder_path):
         return grouped_files
 
-    folder_real = os.path.realpath(folder_path)
-    for root, _, files in os.walk(folder_path):
-        if os.path.islink(root):
-            logger.warning("安全跳过符号链接目录: %s", root)
-            continue
+    for root, files in walk_publish_files(folder_path):
         folder_media = []
         for file in files:
             full_path = os.path.join(root, file)
-            if os.path.islink(full_path):
-                logger.warning("安全跳过符号链接文件: %s", full_path)
-                continue
-            try:
-                real_file = os.path.realpath(full_path)
-                if os.path.commonpath([folder_real, real_file]) != folder_real:
-                    logger.warning("安全跳过越界路径文件: %s", full_path)
-                    continue
-            except (OSError, ValueError):
-                continue
             is_media, _ = is_supported_local_media(full_path)
             if is_media:
                 folder_media.append(full_path)

@@ -1,0 +1,166 @@
+[project]
+name = "tg-media-hub"
+version = "1.0.0"
+description = "Telegram Media Automation Suite"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.95.0",
+    "uvicorn>=0.20.0",
+    "telethon>=1.41.0",
+    "pydantic>=2.0.0",
+    "pyjwt>=2.8.0",
+    "websockets>=11.0",
+    "cryptg>=0.4.0",
+    "cryptography>=41.0.0",
+    "prometheus-client>=0.20.0",
+    "aiohttp>=3.9.0",
+    "aiohttp-socks>=0.10.0",
+    "orjson>=3.9.0",
+    "uvloop>=0.19.0; sys_platform != 'win32'",
+    "httptools>=0.6.0; sys_platform != 'win32'",
+    "pillow>=13.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/anonham/TG-Media-Hub"
+Repository = "https://github.com/anonham/TG-Media-Hub"
+Issues = "https://github.com/anonham/TG-Media-Hub/issues"
+Changelog = "https://github.com/anonham/TG-Media-Hub/blob/main/CHANGELOG.md"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.27.0",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=5.0.0",
+    "ruff>=0.8.0",
+    "mypy>=1.13.0",
+    "playwright>=1.49.0",
+    "hypothesis>=6.170.14",
+    "pytest-xdist>=3.5.0",
+    "bandit>=1.7.0",
+]
+
+[tool.uv]
+package = false
+exclude-newer = "7 days"
+
+[tool.ruff]
+# 格式化器单源配置。line-length 120 对齐仓库既有书写风格, 最小化纯格式
+# commit 的 diff 面积。
+line-length = 120
+target-version = "py312"
+exclude = [
+    ".venv",
+    "data",
+    "static",
+    "frontend",
+]
+
+[tool.ruff.lint]
+# 规则族 (C90/SIM/RUF/PERF/ASYNC/PIE/RET/PT/PL) —— 存量违规由
+# lint_ratchet_baseline.json 计数棘轮监管 (只减不增, scripts/lint_ratchet.py 为阻塞门禁);
+# 本 ignore 清单仅承载"判定不监管"的规则 (误报 / 评审管辖 / tests 惯用形态)。
+# E501 交由 formatter 管辖 (format 不切长字符串/注释, 硬卡会误伤文档性长行)。
+select = ["E", "F", "W", "I", "B", "UP", "C90", "SIM", "RUF", "PERF", "ASYNC", "PIE", "RET", "PT", "PL"]
+ignore = [
+    "E501",
+    # E741: 代码库存在 λ 惯用的 l 变量名 (极少), 收益不抵改名声浪
+    "E741",
+    # RUF001-003: 中文全角标点被误判为可混淆字符 (仓库注释/文案以中文为主)
+    "RUF001",
+    "RUF002",
+    "RUF003",
+    # PLR2004: magic-value 由评审与自研守卫管辖 (测试断言含大量合法字面量)
+    "PLR2004",
+    # PLR0913/PLR0917: 参数个数 —— 后续复杂度收口后再评估收紧
+    "PLR0913",
+    "PLR0917",
+    # PLC0415: 局部导入 —— app 侧已清零 (engines 规范化), tests 侧存在合法分段导入形态
+    "PLC0415",
+    # PT018: pytest 复合断言 (and/or) 属 tests 惯用形态
+    "PT018",
+    # PLW1510: subprocess 缺 check —— scripts/tests 场景多为有意容错调用
+    "PLW1510",
+]
+
+[tool.ruff.lint.mccabe]
+# 圈复杂度 15 门禁 (存量违规计数由棘轮监管)
+max-complexity = 15
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI 依赖注入默认值 (Depends/Query/...) 是 B008 的合法形态
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Body",
+    "fastapi.Header",
+    "fastapi.Cookie",
+    "fastapi.File",
+    "fastapi.Form",
+    "fastapi.Security",
+]
+
+[tool.ruff.format]
+line-ending = "lf"
+
+[tool.ruff.lint.per-file-ignores]
+# E402 豁免 = 刻意的 "先改环境再导入" 模式 (移动导入会改变测试语义):
+# - conftest: data/log 目录重定向必须先于一切 app 导入 (沙箱红线)
+# - benchmarks: sys.path 引导先于项目导入
+# - 两个 pipeline 测试: 模块级 mock 前置/分段导入先于被测模块导入
+# - fake_pikpak: 测试假服务, 常量定义先于导入
+"tests/conftest.py" = ["E402"]
+"scripts/benchmarks/*" = ["E402"]
+"tests/pipeline/test_stream_chunk_resilience.py" = ["E402"]
+"tests/pipeline/test_fmp4_engine_contract.py" = ["E402"]
+"tests/pipeline/test_vsse_engine_contract.py" = ["E402"]
+"tests/fake_pikpak/*" = ["E402"]
+
+[tool.mypy]
+# 全量检查 (files = app + run.py) + strict 子包 (0 豁免, 100% 覆盖)。
+# run.py 的 2 处 Telethon 内部猴子补丁使用行内 type: ignore; tests/test_mypy_ratchet.py 锁定白名单防回退。
+python_version = "3.12"
+plugins = ["pydantic.mypy"]
+files = [
+    "app",
+    "run.py",
+]
+follow_imports = "normal"
+ignore_missing_imports = true
+check_untyped_defs = true
+warn_unused_ignores = true
+no_implicit_optional = true
+
+# pipeline / fast_telethon / fmp4_pipe_uploader / keyframe_prober / iso_bmff.fragmented / iso_bmff.ebml 启用 strict 检查
+[[tool.mypy.overrides]]
+module = [
+    "app.core.pipeline",
+    "app.core.pipeline.*",
+    "app.core.fast_telethon",
+    "app.core.fast_telethon.*",
+    "app.core.fmp4_pipe_uploader",
+    "app.core.keyframe_prober",
+    "app.core.iso_bmff.fragmented",
+    "app.core.iso_bmff.ebml",
+]
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+warn_return_any = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# 仓库根加入 sys.path: 使裸 pytest (控制台脚本, CI 场景) 与 python -m pytest 等价地
+# 解析 app / run 等仓库根导入, 否则收集阶段即 ModuleNotFoundError
+pythonpath = [".", "tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "e2e_live: live-API E2E against real Telegram (manually gated by E2E_LIVE=1; never runs in CI, D7)",
+    "e2e_ui: End-to-end UI tests via Playwright (manually gated by E2E_UI=1; never runs in CI, D5)",
+    "benchmark: reserved for in-pytest calibration helpers; strict SLA verification lives in scripts/benchmarks/* and CI excludes this marker via -m 'not benchmark' (never add strict timing asserts to the pytest suite)",
+]
+

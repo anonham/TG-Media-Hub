@@ -514,14 +514,18 @@ async def test_dynamic_download_concurrency_updates_watergate_and_zero_drift():
         assert scheduler._global_download_threads == 32
         assert download_threads_in_use._value.get() == 32
 
-        # 2. 动态扩容 dyn_gdt_1 从 8 -> 12 线程，验证水门记账同步为 36，随后缩回 4 线程 -> 28
+        # 2. 动态扩容受全局 32 线程上限钳位，缩容后在剩余容量内可正常扩容
         scheduler.update_download_threads("dyn_gdt_1", 12)
-        assert scheduler._global_download_threads == 36
-        assert scheduler._task_thread_allocations["dyn_gdt_1"] == 12
+        assert scheduler._global_download_threads == 32
+        assert scheduler._task_thread_allocations["dyn_gdt_1"] == 8
 
         scheduler.update_download_threads("dyn_gdt_1", 4)
         assert scheduler._global_download_threads == 28
         assert scheduler._task_thread_allocations["dyn_gdt_1"] == 4
+
+        scheduler.update_download_threads("dyn_gdt_1", 8)
+        assert scheduler._global_download_threads == 32
+        assert scheduler._task_thread_allocations["dyn_gdt_1"] == 8
 
         # 3. 全部任务结束退出，验证 _cleanup_task_resources 按最新分配扣减，最终水门计数零漂移归 0
         for ev in events.values():
@@ -2146,3 +2150,123 @@ async def test_account_rejections_survive_logging_and_scan_failures(inactive, sc
     assert notified == [("rejected_0", False), ("rejected_1", False)]
     acquire.assert_not_called()
     assert scheduler._running_tasks == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stopped_status", ["paused", "cancelled"])
+async def test_retry_exhaustion_preserves_stopped_status(monkeypatch, stopped_status):
+    from app.core.pipeline.placeholder import PlaceholderSlotCoordinator
+
+    sched = TaskScheduler()
+    task_id = f"exhaust_stop_{stopped_status}"
+    TaskQueueRepository.create(task_id, "publish_folder", {}, status=stopped_status)
+    broadcast = AsyncMock()
+    log_mock = AsyncMock()
+    finalize_mock = AsyncMock()
+    monkeypatch.setattr("app.core.scheduler.connection_manager.broadcast", broadcast)
+    monkeypatch.setattr(TaskQueueRepository, "append_log_async", log_mock)
+    monkeypatch.setattr(PlaceholderSlotCoordinator, "finalize_terminal", finalize_mock)
+
+    await sched._handle_task_retry(task_id, retry_count=3, max_retries=3, error_msg="boom")
+
+    assert TaskQueueRepository.get_status(task_id) == stopped_status
+    log_mock.assert_not_awaited()
+    finalize_mock.assert_not_awaited()
+    broadcast.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stopped_status", ["paused", "cancelled"])
+async def test_fatal_error_and_pikpak_cooldown_preserve_stopped_status(monkeypatch, stopped_status):
+    from app.core.pipeline.placeholder import PlaceholderSlotCoordinator
+    from app.core.scheduler import FatalTaskError
+    from app.core.stream_chunk_provider import PikPakThrottledError
+
+    sched = TaskScheduler()
+    tid_fatal = f"fatal_stop_{stopped_status}"
+    tid_cool = f"cool_stop_{stopped_status}"
+    TaskQueueRepository.create(tid_fatal, "publish_folder", {}, status="running")
+    TaskQueueRepository.create(tid_cool, "pikpak_publish", {}, status="running")
+    broadcast = AsyncMock()
+    finalize_mock = AsyncMock()
+    monkeypatch.setattr("app.core.scheduler.connection_manager.broadcast", broadcast)
+    monkeypatch.setattr(PlaceholderSlotCoordinator, "finalize_terminal", finalize_mock)
+
+    async def fatal_exec(tid, *_args):
+        TaskQueueRepository.update_status(tid, stopped_status)
+        raise FatalTaskError("fatal err")
+
+    async def cool_exec(tid, *_args):
+        TaskQueueRepository.update_status(tid, stopped_status)
+        raise PikPakThrottledError("429", status=429)
+
+    sched.register_executor("publish_folder", fatal_exec)
+    sched.register_executor("pikpak_publish", cool_exec)
+
+    await sched._run_task_wrapper(tid_fatal, "publish_folder", {}, None, retry_count=0, max_retries=3)
+    await sched._run_task_wrapper(tid_cool, "pikpak_publish", {}, None, retry_count=0, max_retries=3)
+
+    assert TaskQueueRepository.get_status(tid_fatal) == stopped_status
+    assert TaskQueueRepository.get_status(tid_cool) == stopped_status
+    finalize_mock.assert_not_awaited()
+    broadcast.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_requeue_resumed_pause_exit_retries_transient_db_error_and_drops_conflict(monkeypatch):
+    from app.core.runtime import resume_paused_executor, settle_task_pause_exit
+
+    sched = TaskScheduler()
+    task_id = "resume-transient-retry"
+    TaskQueueRepository.create(task_id, "download_link", {"links": ["https://t.me/c/1/2"]}, status="paused")
+    version = TaskQueueRepository.get_by_id(task_id)["updated_at"]
+    set_task_control(task_id, paused=True)
+    assert await asyncio.to_thread(resume_paused_executor, task_id, version)
+    resume_controls = settle_task_pause_exit(task_id)
+    assert resume_controls is not None
+
+    broadcast = AsyncMock()
+    monkeypatch.setattr("app.core.scheduler.connection_manager.broadcast", broadcast)
+
+    with patch.object(
+        TaskQueueRepository,
+        "requeue_task_for_resume",
+        side_effect=RuntimeError("database is locked"),
+    ):
+        await sched._requeue_resumed_pause_exit(task_id, resume_controls)
+
+    assert TaskQueueRepository.get_status(task_id) == "paused"
+    assert dict.get(active_task_controls, task_id) is resume_controls
+    assert task_id in sched._pending_resume_requeues
+
+    with patch.object(TaskQueueRepository, "get_queued_candidates", return_value=[]):
+        await sched._schedule_next_tasks()
+
+    assert TaskQueueRepository.get_status(task_id) == "queued"
+    assert task_id not in active_task_controls
+    assert task_id not in sched._pending_resume_requeues
+
+    # 同键冲突不得保留恢复意图或无限重试
+    conflict_tid = "resume-conflict-drop"
+    TaskQueueRepository.create(conflict_tid, "download_link", {"download_target_key": "dup-key"}, status="paused")
+    TaskQueueRepository.create("other-active", "download_link", {"download_target_key": "dup-key"}, status="running")
+    c_ver = TaskQueueRepository.get_by_id(conflict_tid)["updated_at"]
+    set_task_control(conflict_tid, paused=True)
+    assert await asyncio.to_thread(resume_paused_executor, conflict_tid, c_ver)
+    c_controls = settle_task_pause_exit(conflict_tid)
+    assert c_controls is not None
+    await sched._requeue_resumed_pause_exit(conflict_tid, c_controls)
+    assert TaskQueueRepository.get_status(conflict_tid) == "paused"
+    assert conflict_tid not in active_task_controls
+    assert conflict_tid not in sched._pending_resume_requeues
+
+
+def test_update_download_threads_caps_at_global_limit():
+    sched = TaskScheduler()
+    sched._task_thread_allocations = {"t1": 24, "t2": 4}
+    sched._global_download_threads = 28
+
+    sched.update_download_threads("t2", 16)
+
+    assert sched._task_thread_allocations["t2"] == 8
+    assert sched._global_download_threads == sched.MAX_GLOBAL_DOWNLOAD_THREADS

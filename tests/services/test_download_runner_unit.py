@@ -145,7 +145,7 @@ async def test_finalize_failed_task_few_items():
     ):
         await _finalize_failed_task(task_id, failed)
 
-    mock_status.assert_awaited_once_with(task_id, "failed")
+    mock_status.assert_awaited_once_with(task_id, "failed", from_statuses=("running",))
     assert mock_log.await_count == 2
     mock_broadcast.assert_awaited_once_with({"type": "task_update", "task_id": task_id, "status": "failed"})
 
@@ -303,7 +303,7 @@ async def test_finalize_download_completed():
     ):
         await _finalize_download_completed(task_id, state, "全部下载完成")
 
-    mock_status.assert_awaited_once_with(task_id, "completed")
+    mock_status.assert_awaited_once_with(task_id, "completed", from_statuses=("running",))
     mock_progress.assert_awaited_once()
     mock_log.assert_awaited_once_with(task_id, "🎉 全部下载完成！")
     assert mock_broadcast.await_count == 2
@@ -886,3 +886,26 @@ async def test_album_discovery_failure_marks_download_task_failed():
     assert len(failed_items) == 1
     assert failed_items[0][0] == link
     mock_done.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_download_terminal_helpers_skip_side_effects_when_guard_misses():
+    task_id = "dl_guard_missed"
+    state = _DownloadRunState(total_items=2, cumulative_done_bytes=512)
+
+    with (
+        patch(
+            "app.services.download_runner.TaskQueueRepository.update_status_async",
+            new=AsyncMock(return_value=False),
+        ) as mock_status,
+        patch("app.services.download_runner.TaskQueueRepository.update_progress_async", new=AsyncMock()) as mock_prog,
+        patch("app.services.download_runner.TaskQueueRepository.append_log_async", new=AsyncMock()) as mock_log,
+        patch("app.services.download_runner.connection_manager.broadcast", new=AsyncMock()) as mock_bcast,
+    ):
+        await _finalize_failed_task(task_id, [("item1", "err")])
+        await _finalize_download_completed(task_id, state, "全部下载完成")
+
+    assert mock_status.await_count == 2
+    mock_prog.assert_not_awaited()
+    mock_log.assert_not_awaited()
+    mock_bcast.assert_not_awaited()

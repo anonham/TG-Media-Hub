@@ -251,7 +251,9 @@ async def test_fatal_task_error_finalizes_placeholder_slot_and_broadcasts():
     """验证 FatalTaskError 发生时必定触发 PlaceholderSlotCoordinator.finalize_terminal 并广播 failed"""
     scheduler = TaskScheduler()
     task_id = "test_fatal_slot_01"
-    TaskQueueRepository.create(task_id=task_id, task_type="publish_folder", params={"folder_path": "/p"})
+    TaskQueueRepository.create(
+        task_id=task_id, task_type="publish_folder", params={"folder_path": "/p"}, status="running"
+    )
 
     broadcast_events = []
 
@@ -1822,3 +1824,44 @@ def test_forward_strategy_extract_run_params_prefers_pinned_canonical_peers():
     )
     assert resumed_run["source_chat"] == "-1009000000017"
     assert resumed_run["target_chat"] == "-1009000000018"
+
+
+def test_required_alias_skips_empty_strings_and_empty_pikpak_fid_not_completed():
+    assert DownloadRangeStrategy().extract_run_params(
+        {"channel": "", "channel_identifier": "@media_archive", "force": False}
+    ) == {
+        "channel_identifier": "@media_archive",
+        "start_id": 1,
+        "end_id": 1,
+        "force": False,
+    }
+    pikpak_strat = PikPakPublishStrategy()
+    extracted_pk = pikpak_strat.extract_run_params(
+        {"target_channel": "", "target_chat": "@archive", "remote_files": [{"file_id": "f1"}], "album_mode": False}
+    )
+    assert extracted_pk["target_channel"] == "@archive"
+    assert extracted_pk["album_mode"] is False
+
+    extracted_pf = PublishFolderStrategy().extract_run_params(
+        {
+            "folder_path": "/media",
+            "target_channel": "",
+            "target_chat": "@media",
+            "album_mode": False,
+            "delay_seconds": 0,
+        }
+    )
+    assert extracted_pf["target_channel"] == "@media"
+    assert extracted_pf["album_mode"] is False
+    assert extracted_pf["delay_seconds"] == 0.0
+
+    completed, _patch, _msg = pikpak_strat.validate_and_prepare_resume(
+        {
+            "id": "pk_empty_fid",
+            "params": {
+                "target_channel": "@archive",
+                "remote_files": [{"file_id": "", "name": "missing.mp4"}],
+            },
+        }
+    )
+    assert completed is False

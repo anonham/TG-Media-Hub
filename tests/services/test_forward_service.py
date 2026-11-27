@@ -2329,3 +2329,57 @@ async def test_forward_start_and_error_logs_hide_invites(monkeypatch):
     messages = [call.args[1] for call in append.await_args_list]
     assert any("-1234" in message for message in messages)
     assert all("fakeSource" not in message and "fakeTarget" not in message for message in messages)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stopped_status", ["paused", "cancelled"])
+async def test_broadcast_forward_start_does_not_overwrite_stopped_status(monkeypatch, stopped_status):
+    from app.services import forward_service as service
+
+    task_id = f"fwd_start_stop_{stopped_status}"
+    TaskQueueRepository.create(task_id, "forward_channel", {}, status=stopped_status)
+    state = service._ForwardRunState(task_id, "-1001", "-1002", 50, False, False, run_total=10)
+    progress_mock = AsyncMock()
+    monkeypatch.setattr(TaskQueueRepository, "update_progress_async", progress_mock)
+
+    expected_exc = service.ForwardCancelledError if stopped_status == "cancelled" else service.ForwardPausedError
+    with pytest.raises(expected_exc):
+        await service._broadcast_forward_start(state, 1, 10)
+
+    assert TaskQueueRepository.get_status(task_id) == stopped_status
+    progress_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_dry_run_auto_pause_preserves_cancelled_status(monkeypatch):
+    from app.core.runtime import active_task_controls, set_task_control
+    from app.services import forward_service as service
+
+    task_id = "fwd_dry_cancel_race"
+    TaskQueueRepository.create(task_id, "forward_channel", {}, status="running")
+    state = service._ForwardRunState(
+        task_id,
+        "-1001",
+        "-1002",
+        50,
+        False,
+        dry_run=True,
+        run_total=10,
+        pending_skips=[(1, "dead", None, None)],
+    )
+    ctx = service._ForwardRunCtx(
+        userbot=AsyncMock(), source_entity=MagicMock(), target_entity=MagicMock(), pacer=AsyncMock()
+    )
+
+    def commit_and_cancel(*_a, **_kw):
+        TaskQueueRepository.update_status(task_id, "cancelled", from_statuses=("running",))
+        set_task_control(task_id, cancelled=True)
+
+    monkeypatch.setattr(service.ForwardLedgerRepository, "commit_batch_records", commit_and_cancel)
+    monkeypatch.setattr(service.connection_manager, "broadcast", AsyncMock())
+    try:
+        with pytest.raises(service.ForwardCancelledError):
+            await service._commit_batch(state, ctx, [])
+        assert TaskQueueRepository.get_status(task_id) == "cancelled"
+    finally:
+        active_task_controls.pop(task_id, None)

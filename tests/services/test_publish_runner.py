@@ -331,7 +331,7 @@ async def test_publish_diagnostics_persist_latest_results():
 @pytest.mark.asyncio
 async def test_skip_only_completed_broadcasts_100_percent(monkeypatch):
     task_id = "pr_skip_only"
-    TaskQueueRepository.create(task_id, "publish_folder", {})
+    TaskQueueRepository.create(task_id, "publish_folder", {}, status="running")
     broadcasts: list = []
     monkeypatch.setattr(pr.connection_manager, "broadcast", AsyncMock(side_effect=broadcasts.append))
     monkeypatch.setattr(TaskQueueRepository, "update_progress", lambda *args, **kwargs: None)
@@ -360,7 +360,7 @@ async def test_skip_only_completed_broadcasts_100_percent(monkeypatch):
 @pytest.mark.asyncio
 async def test_partial_failure_retains_real_percent(monkeypatch):
     task_id = "pr_partial"
-    TaskQueueRepository.create(task_id, "publish_folder", {})
+    TaskQueueRepository.create(task_id, "publish_folder", {}, status="running")
     broadcasts: list = []
     monkeypatch.setattr(pr.connection_manager, "broadcast", AsyncMock(side_effect=broadcasts.append))
     monkeypatch.setattr(TaskQueueRepository, "update_progress", lambda *args, **kwargs: None)
@@ -467,6 +467,34 @@ async def test_genuine_session_invalid_still_reported(monkeypatch):
         await pr.run_publish_pikpak_task(task_id, "-100123", [{"file_id": "f1", "is_dir": True}])
         assert report_mock.await_count == 1, "非 PikPak 域的会话失效文本仍必须走统一上报"
         assert task_id not in active_task_controls
+    finally:
+        active_task_controls.pop(task_id, None)
+        TaskQueueRepository.delete(task_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stopped_status", ["paused", "cancelled"])
+async def test_finalize_publish_result_preserves_stop_committed_during_diagnostics(monkeypatch, stopped_status):
+    task_id = f"pr_stop_race_{stopped_status}"
+    TaskQueueRepository.create(task_id, "publish_folder", {}, status="running")
+    broadcasts: list[dict[str, Any]] = []
+    finalize_slots = AsyncMock()
+
+    async def persist_and_stop(tid, *_args, **_kwargs):
+        TaskQueueRepository.update_status(tid, stopped_status, from_statuses=("running",))
+        set_task_control(tid, **{stopped_status: True})
+
+    monkeypatch.setattr(pr, "_persist_publish_diagnostics", persist_and_stop)
+    monkeypatch.setattr(pr, "_finalize_placeholder_slots", finalize_slots)
+    monkeypatch.setattr(pr.connection_manager, "broadcast", AsyncMock(side_effect=broadcasts.append))
+    try:
+        res = PublishFolderResult(1, 2, ["a.mp4"], [])
+        await pr._finalize_publish_result(
+            task_id, res, "-100123", SimpleNamespace(last_progress_bytes=lambda: (0, 0)), pikpak=False
+        )
+        assert TaskQueueRepository.get_status(task_id) == stopped_status
+        finalize_slots.assert_not_awaited()
+        assert broadcasts == []
     finally:
         active_task_controls.pop(task_id, None)
         TaskQueueRepository.delete(task_id)

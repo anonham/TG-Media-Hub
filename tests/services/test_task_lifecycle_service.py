@@ -39,6 +39,7 @@ from app.core.runtime import (
 from app.core.scheduler import RetryableTaskError, TaskPausedError, TaskScheduler, UploadPausedError
 from app.db.database import get_db
 from app.db.download_repository import DownloadBreakpointRepository
+from app.db.publish_repository import PublishHistoryRepository
 from app.db.task_repository import TaskQueueRepository
 from app.models.task import (
     BatchTaskActionRequest,
@@ -1169,3 +1170,95 @@ async def test_clear_finished_preserves_controls_if_executor_running_at_cleanup(
         await TaskLifecycleService.clear_finished_tasks(sched=mock_sched)
 
     assert active_task_controls["t_raced"]["cancelled"] is True
+
+
+@pytest.mark.asyncio
+async def test_resume_task_rejects_unknown_mode():
+    with pytest.raises(HTTPException) as exc_info:
+        await TaskLifecycleService.resume_task("any_task", mode="steayd")
+    assert exc_info.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_skip_current_file_rejects_concurrent_retry_before_writes(monkeypatch):
+    task_id = "skip_retry_race"
+    TaskQueueRepository.create(
+        task_id,
+        "pikpak_publish",
+        {
+            "target_channel": "-100123",
+            "remote_files": [{"file_id": "fid_1", "name": "demo.mp4", "size_bytes": 100}],
+        },
+        status="failed",
+    )
+    ensure_slot = AsyncMock(return_value=999)
+    monkeypatch.setattr("app.services.task_lifecycle_service._ensure_skip_placeholder_slot", ensure_slot)
+    monkeypatch.setattr(
+        "app.services.task_lifecycle_service.task_scheduler.is_task_running",
+        lambda _tid: False,
+    )
+
+    # 1. 在发占位卡前任务状态被重试改变 -> 409, 不发卡不写历史
+    orig_get = TaskQueueRepository.get_by_id_async
+    calls = 0
+
+    async def mutate_before_slot(tid):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            TaskQueueRepository.requeue_task_for_resume(tid, "failed", params_patch={})
+        return await orig_get(tid)
+
+    monkeypatch.setattr(TaskQueueRepository, "get_by_id_async", mutate_before_slot)
+    with pytest.raises(HTTPException) as exc1:
+        await TaskLifecycleService.skip_current_file(task_id, SkipCurrentFileRequest(file_id="fid_1"))
+    assert exc1.value.status_code == 409
+    ensure_slot.assert_not_awaited()
+    assert not PublishHistoryRepository.is_published("-100123", "", 0, source_type="pikpak", remote_file_id="fid_1")
+
+    # 2. 在 _ensure_skip_placeholder_slot await 期间任务被重试 -> 提交阶段原子拒绝 409, 不写历史/skipped_files
+    monkeypatch.setattr(TaskQueueRepository, "get_by_id_async", orig_get)
+    task_id2 = "skip_retry_race_during_slot"
+    TaskQueueRepository.create(
+        task_id2,
+        "pikpak_publish",
+        {
+            "target_channel": "-100123",
+            "remote_files": [{"file_id": "fid_2", "name": "demo2.mp4", "size_bytes": 100}],
+        },
+        status="failed",
+    )
+
+    async def mutate_during_slot(*_args, **_kwargs):
+        TaskQueueRepository.requeue_task_for_resume(task_id2, "failed", params_patch={})
+        return 888
+
+    monkeypatch.setattr("app.services.task_lifecycle_service._ensure_skip_placeholder_slot", mutate_during_slot)
+    with pytest.raises(HTTPException) as exc2:
+        await TaskLifecycleService.skip_current_file(task_id2, SkipCurrentFileRequest(file_id="fid_2"))
+    assert exc2.value.status_code == 409
+    assert not PublishHistoryRepository.is_published("-100123", "", 0, source_type="pikpak", remote_file_id="fid_2")
+    assert not (TaskQueueRepository.get_by_id(task_id2)["params"].get("skipped_files") or [])
+
+
+@pytest.mark.asyncio
+async def test_delete_task_preserves_partial_cleanup_results_on_failure(monkeypatch):
+    task_id = "del_partial_fail"
+    TaskQueueRepository.create(task_id, "download_link", {}, status="failed")
+    DownloadBreakpointRepository.upsert(task_id, "-1001", 1, "/tmp/a.part", "/tmp/a.meta", "/tmp/a.mp4")
+
+    def partial_delete(targets):
+        if targets == ["/tmp/a.part"]:
+            return {"deleted": ["/tmp/a.part"], "skipped": []}
+        raise OSError("disk error")
+
+    monkeypatch.setattr("app.services.task_lifecycle_service.StorageService.delete_files", partial_delete)
+    monkeypatch.setattr("app.services.task_lifecycle_service.gc_task_meta", lambda _tid: None)
+    monkeypatch.setattr("app.services.task_lifecycle_service.connection_manager.broadcast", AsyncMock())
+
+    res = await TaskLifecycleService.delete_task(task_id, delete_files=True)
+    assert res["status"] == "deleted"
+    assert res["files_deleted"] == ["/tmp/a.part"]
+    assert len(res["files_skipped"]) == 1
+    assert res["files_skipped"][0]["path"] == "/tmp/a.meta"
+    assert "disk error" in res["files_skipped"][0]["reason"]

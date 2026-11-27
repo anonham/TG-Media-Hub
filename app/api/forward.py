@@ -137,17 +137,19 @@ async def get_forward_history(
     offset = (page - 1) * limit
     if offset > 2**63 - 1:
         return {"status": "success", "count": 0, "data": []}
-    parsed_source = ForwardService.canonicalize_chat_key(source_chat) if source_chat else None
-    parsed_target = ForwardService.canonicalize_chat_key(target_chat) if target_chat else None
 
-    rows = await asyncio.to_thread(
-        ForwardConsoleService.query_history,
-        source_chat=parsed_source,
-        target_chat=parsed_target,
-        source_msg_id=source_msg_id,
-        limit=limit,
-        offset=offset,
-    )
+    def _query():
+        parsed_source = ForwardService.canonicalize_chat_key(source_chat) if source_chat else None
+        parsed_target = ForwardService.canonicalize_chat_key(target_chat) if target_chat else None
+        return ForwardConsoleService.query_history(
+            source_chat=parsed_source,
+            target_chat=parsed_target,
+            source_msg_id=source_msg_id,
+            limit=limit,
+            offset=offset,
+        )
+
+    rows = await asyncio.to_thread(_query)
     return {"status": "success", "count": len(rows), "data": rows}
 
 

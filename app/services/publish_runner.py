@@ -221,17 +221,16 @@ async def _claim_and_mark_running(task_id: str) -> bool:
             task_id, "[执行器] 任务在调度窗口内已被用户取消/暂停，跳过执行且不覆盖终态"
         )
         return False
-    if (
-        not await TaskQueueRepository.update_status_async(
-            task_id, "running", from_statuses=("queued", "pending", "running")
-        )
-        and await asyncio.to_thread(TaskQueueRepository.get_status, task_id) is not None
+    if not await TaskQueueRepository.update_status_async(
+        task_id, "running", from_statuses=("queued", "pending", "running")
     ):
-        await TaskQueueRepository.append_log_async(
-            task_id, "[执行器] 任务在调度窗口内已被用户取消/暂停，跳过执行且不覆盖终态"
-        )
-        release_runner_controls(task_id)
-        return False
+        is_managed = bool(active_task_controls.get(task_id, {}).get("scheduler_managed"))
+        if is_managed or await asyncio.to_thread(TaskQueueRepository.get_status, task_id) is not None:
+            await TaskQueueRepository.append_log_async(
+                task_id, "[执行器] 任务在调度窗口内已被用户取消/暂停或删除，跳过执行且不覆盖终态"
+            )
+            release_runner_controls(task_id)
+            return False
     return True
 
 

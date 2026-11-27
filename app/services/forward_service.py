@@ -27,7 +27,13 @@ from app.core.entity_resolver import (
 )
 from app.core.intervals import compute_gaps
 from app.core.redact import redact_telegram_invites
-from app.core.runtime import mark_task_pause_exit, release_runner_controls, set_task_control, try_claim_executor_entry
+from app.core.runtime import (
+    active_task_controls,
+    mark_task_pause_exit,
+    release_runner_controls,
+    set_task_control,
+    try_claim_executor_entry,
+)
 from app.core.scheduler import FatalTaskError, TaskCancelledError, TaskPausedError
 from app.core.session_errors import is_session_invalid_error, report_session_invalid
 from app.db.forward_repository import ForwardLedgerRepository
@@ -417,7 +423,8 @@ class ForwardService:
 
         # 2. 计算本次任务的进度分母 run_total (任务范围消息数口径) 并立刻更新任务状态为 running
         state.run_total = await _compute_forward_run_total(userbot, source_entity, start_id, end_id)
-        await _broadcast_forward_start(state, start_id, end_id)
+        if not await _broadcast_forward_start(state, start_id, end_id):
+            return state.forwarded_count
 
         ctx = _ForwardRunCtx(
             userbot=userbot,
@@ -1116,10 +1123,10 @@ async def _compute_forward_run_total(userbot, source_entity, start_id: int | Non
     return channel_total
 
 
-async def _broadcast_forward_start(state: _ForwardRunState, start_id: int | None, end_id: int | None) -> None:
+async def _broadcast_forward_start(state: _ForwardRunState, start_id: int | None, end_id: int | None) -> bool:
     """转发启动态: running 置位 + 初始进度回写 + WS 广播"""
     if not state.task_id:
-        return
+        return True
     updated = await TaskQueueRepository.update_status_async(
         state.task_id, "running", from_statuses=("queued", "pending", "running")
     )
@@ -1130,8 +1137,7 @@ async def _broadcast_forward_start(state: _ForwardRunState, start_id: int | None
             raise ForwardCancelledError("Task cancelled before forward start")
         if db_status == "paused":
             raise ForwardPausedError("Task paused before forward start")
-        if db_status is not None:
-            return
+        return db_status is None and not active_task_controls.get(state.task_id, {}).get("scheduler_managed")
     range_hint = f" (范围 ID {start_id or 1} ~ {end_id or '最新'})" if (start_id or end_id) else ""
     await TaskQueueRepository.update_progress_async(
         state.task_id,
@@ -1162,6 +1168,7 @@ async def _broadcast_forward_start(state: _ForwardRunState, start_id: int | None
             },
         }
     )
+    return True
 
 
 def _build_iter_range_kwargs(start_id: int | None, end_id: int | None) -> dict:

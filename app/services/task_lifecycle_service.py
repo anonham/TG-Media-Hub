@@ -10,6 +10,7 @@ from functools import partial
 from typing import Any
 
 from fastapi import HTTPException
+from telethon.errors import BadRequestError, FloodWaitError, ForbiddenError
 
 from app.core.client_manager import client_manager, is_private_channel_identifier
 from app.core.connection_manager import connection_manager
@@ -244,10 +245,15 @@ async def _ensure_skip_placeholder_slot(
             entity = await resolve_entity(client, target_chat_id)
         except Exception:
             entity = target_chat_id
-        if poster_data:
-            message = await client.send_file(entity, as_named_stream(poster_data), caption=caption)
-        else:
-            message = await client.send_message(entity, caption)
+        try:
+            if poster_data:
+                message = await client.send_file(entity, as_named_stream(poster_data), caption=caption)
+            else:
+                message = await client.send_message(entity, caption)
+        except (BadRequestError, ForbiddenError, FloodWaitError) as exc:
+            await asyncio.to_thread(PlaceholderSlotRepository.delete_unactivated_slot, slot_id)
+            logger.warning("跳过已提交，占位卡发送被 Telegram 拒绝: %s", exc)
+            return 0
         msg_id = int(message.id)
         if await asyncio.to_thread(
             PlaceholderSlotRepository.activate_reserved_slot,
@@ -761,10 +767,11 @@ class TaskLifecycleService:
                 tg_message_id=0,
                 task_id=task_id,
                 transaction=cursor,
+                insert_only=True,
             ),
         )
         if not committed:
-            raise HTTPException(status_code=409, detail="任务状态在跳过期间已变更，请刷新后重试")
+            raise HTTPException(status_code=409, detail="任务状态在跳过期间已变更或文件已存在发布回执，请刷新后重试")
 
         msg_id = await _ensure_skip_placeholder_slot(
             task_id,

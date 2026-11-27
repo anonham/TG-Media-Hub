@@ -147,12 +147,13 @@ class PublishHistoryRepository:
         tg_message_id: int = 0,
         task_id: str = "",
         transaction: sqlite3.Cursor | None = None,
-    ):
+        insert_only: bool = False,
+    ) -> bool:
         """记录文件发送历史 (file_hash 缺省 '' 时按旧键语义记录)。
 
         source_type='pikpak': file_path 存 PikPak 远端路径 (展示/调试用),
         防重键为 remote_file_id (部分唯一索引 idx_publish_pikpak_dedup 兜底);
-        INSERT OR REPLACE 沿用既有幂等覆盖语义 (同键重复 record 覆盖而非报错)。
+        默认沿用幂等覆盖语义 (同键重复 record 覆盖而非报错)；insert_only=True 时冲突忽略并返回 False。
 
         写入侧路径归一: file_path 统一经 norm_file_path 落库,
         查询侧单值等值完整命中 UNIQUE 前缀索引 (is_published 同口径)。
@@ -170,40 +171,51 @@ class PublishHistoryRepository:
                 task_id or "",
             )
             if source_type == "pikpak":
-                cursor.execute(
-                    """
-                    INSERT INTO publish_history
-                    (target_chat_id, file_path, file_size, file_hash, published_at,
-                     source_type, remote_file_id, tg_message_id, task_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(target_chat_id, remote_file_id) WHERE source_type='pikpak'
-                    DO UPDATE SET
+                conflict_action = (
+                    "DO NOTHING"
+                    if insert_only
+                    else """DO UPDATE SET
                         file_path = excluded.file_path,
                         file_size = excluded.file_size,
                         file_hash = excluded.file_hash,
                         published_at = excluded.published_at,
                         tg_message_id = excluded.tg_message_id,
-                        task_id = excluded.task_id
+                        task_id = excluded.task_id"""
+                )
+                cursor.execute(
+                    f"""
+                    INSERT INTO publish_history
+                    (target_chat_id, file_path, file_size, file_hash, published_at,
+                     source_type, remote_file_id, tg_message_id, task_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(target_chat_id, remote_file_id) WHERE source_type='pikpak'
+                    {conflict_action}
                     """,
                     common_params,
                 )
             else:
+                conflict_action = (
+                    "DO NOTHING"
+                    if insert_only
+                    else """DO UPDATE SET
+                        file_hash = excluded.file_hash,
+                        published_at = excluded.published_at,
+                        remote_file_id = excluded.remote_file_id,
+                        tg_message_id = excluded.tg_message_id,
+                        task_id = excluded.task_id"""
+                )
                 cursor.execute(
-                    """
+                    f"""
                     INSERT INTO publish_history
                     (target_chat_id, file_path, file_size, file_hash, published_at,
                      source_type, remote_file_id, tg_message_id, task_id)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(target_chat_id, file_path, file_size) WHERE source_type='local'
-                    DO UPDATE SET
-                        file_hash = excluded.file_hash,
-                        published_at = excluded.published_at,
-                        remote_file_id = excluded.remote_file_id,
-                        tg_message_id = excluded.tg_message_id,
-                        task_id = excluded.task_id
+                    {conflict_action}
                     """,
                     common_params,
                 )
+            return cursor.rowcount > 0
 
 
 class PlaceholderSlotRepository:
@@ -215,7 +227,7 @@ class PlaceholderSlotRepository:
     - slot_kind: 'backfillable' (1:1 可回填卡) | 'group_summary' (整组失败汇总卡, 各成员
       行记录共享汇总卡 msg_id 但结构上禁入回填 —— R2 严禁多文件共享同一 msg_id 参与回填);
     - state (backfillable): placeholder_sent → editing → published | failed_terminal | lost;
-      failed_terminal 可经后续成功重试原地复活 (CAS 守卫三态);
+      failed_terminal 仅限所属任务未清理时的同任务重试原地复活 (任务清理时随 SLOT_ACTIVE_STATES_SQL 一并回收);
       state (group_summary): placeholder_sent → flipped | failed_terminal (文本终态);
     - 单点防重: UNIQUE 三键 + CAS 状态转移; 红线: 本表为占位信息唯一落点, 严禁写 publish_history。
     """
@@ -328,21 +340,35 @@ class PlaceholderSlotRepository:
             )
 
     @staticmethod
-    def cas_acquire_edit(target_chat_id, file_path: str, file_size: int) -> bool:
-        """CAS 获取回填编辑权 (R5 独占守卫 + 终态可复活; slot_kind 双过滤 —— J11):
-        仅 backfillable 槽且 state ∈ {placeholder_sent, failed_terminal} 可获取 (排除 editing 防并发双写)。
+    def cas_acquire_edit(target_chat_id, file_path: str, file_size: int, *, task_id: str | None = None) -> bool:
+        """CAS 获取回填编辑权 (R5 独占守卫 + 同任务终态可复活; slot_kind 双过滤 —— J11):
+        仅 backfillable 槽可获取 (排除 editing 防并发双写)。传入 task_id 时仅允许
+        placeholder_sent 跨任务复用，failed_terminal 仅限同任务原地复活，与任务清理口径一致。
         返回 True = 获得编辑权 (状态已置 editing); False = 他处持有/终态不可复活/非回填槽。"""
+        now = time.time()
         with db_cursor(commit=True) as cursor:
-            cursor.execute(
-                """
-                UPDATE placeholder_slots
-                   SET state = 'editing', edit_attempted_at = ?, updated_at = ?
-                 WHERE target_chat_id = ? AND file_path = ? AND file_size = ?
-                   AND slot_kind = 'backfillable'
-                   AND state IN ('placeholder_sent', 'failed_terminal')
-                """,
-                (time.time(), time.time(), str(target_chat_id), norm_file_path(file_path), int(file_size)),
-            )
+            if task_id is None:
+                cursor.execute(
+                    """
+                    UPDATE placeholder_slots
+                       SET state = 'editing', edit_attempted_at = ?, updated_at = ?
+                     WHERE target_chat_id = ? AND file_path = ? AND file_size = ?
+                       AND slot_kind = 'backfillable'
+                       AND state IN ('placeholder_sent', 'failed_terminal')
+                    """,
+                    (now, now, str(target_chat_id), norm_file_path(file_path), int(file_size)),
+                )
+            else:
+                cursor.execute(
+                    """
+                    UPDATE placeholder_slots
+                       SET state = 'editing', edit_attempted_at = ?, updated_at = ?
+                     WHERE target_chat_id = ? AND file_path = ? AND file_size = ?
+                       AND slot_kind = 'backfillable'
+                       AND (state = 'placeholder_sent' OR (state = 'failed_terminal' AND task_id = ?))
+                    """,
+                    (now, now, str(target_chat_id), norm_file_path(file_path), int(file_size), task_id),
+                )
             acquired = cursor.rowcount > 0
         return acquired
 

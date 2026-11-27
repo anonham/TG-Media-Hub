@@ -53,27 +53,38 @@ async def send_album_segment(
 
     if tracked:
         messages = sent if isinstance(sent, list) else [sent]
+        confirmed: list[tuple[int, int]] = []
+        unconfirmed_members: list[str] = []
+        for pos, (index, _) in enumerate(segment):
+            message = messages[pos] if pos < len(messages) else None
+            msg_id = int(getattr(message, "id", 0) or 0)
+            if msg_id > 0:
+                confirmed.append((index, msg_id))
+            else:
+                unconfirmed_members.append(items[index].item_id)
 
         def record_confirmed(cursor: sqlite3.Cursor) -> None:
-            for (index, _), message in zip(segment, messages, strict=False):
-                msg_id = int(getattr(message, "id", 0) or 0)
-                if msg_id:
-                    item = items[index]
-                    PublishHistoryRepository.record(
-                        context.target_chat_id,
-                        f"pikpak://{item.parent_folder_id}/{item.name}" if is_pikpak else item.item_id,
-                        item.size_bytes,
-                        "" if is_pikpak else DownloadHistoryRepository.get_hash_by_path(item.item_id),
-                        source_type="pikpak" if is_pikpak else "local",
-                        remote_file_id=item.item_id if is_pikpak else "",
-                        tg_message_id=msg_id,
-                        task_id=context.task_id,
-                        transaction=cursor,
-                    )
+            for index, msg_id in confirmed:
+                item = items[index]
+                PublishHistoryRepository.record(
+                    context.target_chat_id,
+                    f"pikpak://{item.parent_folder_id}/{item.name}" if is_pikpak else item.item_id,
+                    item.size_bytes,
+                    "" if is_pikpak else DownloadHistoryRepository.get_hash_by_path(item.item_id),
+                    source_type="pikpak" if is_pikpak else "local",
+                    remote_file_id=item.item_id if is_pikpak else "",
+                    tg_message_id=msg_id,
+                    task_id=context.task_id,
+                    transaction=cursor,
+                )
 
         try:
             await asyncio.to_thread(
-                TaskQueueRepository.update_album_delivery, context.task_id, members, finish=record_confirmed
+                TaskQueueRepository.update_album_delivery,
+                context.task_id,
+                members,
+                finish=record_confirmed,
+                keep_pending=unconfirmed_members or None,
             )
         except Exception as exc:
             raise UnconfirmedAlbumError() from exc

@@ -195,7 +195,8 @@ class PublishPipeline:
         if not history_recorded:
             if is_pikpak:
                 history_path = f"pikpak://{item.parent_folder_id}/{item.name}"
-                PublishHistoryRepository.record(
+                await asyncio.to_thread(
+                    PublishHistoryRepository.record,
                     context.target_chat_id,
                     history_path,
                     item.size_bytes,
@@ -206,14 +207,19 @@ class PublishPipeline:
                     task_id=context.task_id or "",
                 )
             else:
-                PublishHistoryRepository.record(
-                    context.target_chat_id,
-                    item.item_id,
-                    item.size_bytes,
-                    DownloadHistoryRepository.get_hash_by_path(item.item_id),
-                    tg_message_id=msg_id,
-                    task_id=context.task_id or "",
-                )
+
+                def _record_local_history() -> None:
+                    file_hash = DownloadHistoryRepository.get_hash_by_path(item.item_id)
+                    PublishHistoryRepository.record(
+                        context.target_chat_id,
+                        item.item_id,
+                        item.size_bytes,
+                        file_hash,
+                        tg_message_id=msg_id,
+                        task_id=context.task_id or "",
+                    )
+
+                await asyncio.to_thread(_record_local_history)
         counters.published += 1
         b.published += 1
         counters.newly += 1
@@ -469,7 +475,9 @@ class PublishPipeline:
         slot = PlaceholderSlotRepository.get_by_identity(context.target_chat_id, identity, size)
         if slot is None or slot["slot_kind"] != "backfillable":
             return None
-        if not PlaceholderSlotRepository.cas_acquire_edit(context.target_chat_id, identity, size):
+        if not PlaceholderSlotRepository.cas_acquire_edit(
+            context.target_chat_id, identity, size, task_id=context.task_id or ""
+        ):
             return await self._handle_backfill_claim_conflict(item, context, identity, size)
         try:
             outcome = await self.engine.edit_item(item, context, int(slot["placeholder_msg_id"]))

@@ -116,8 +116,9 @@ async def _peek_checkpoint_resume_info(
             raw_sig = file_cp.get("plan_signature")
             plan_sig = raw_sig if isinstance(raw_sig, str) and raw_sig else None
             return (total_parts if total_parts > 0 else None), msg_ids, plan_sig
-        if file_cp.get("delivered"):
-            return None, list(map(int, file_cp["delivered"].values())), "incompatible-plan"
+        live_ids = [int(v) for v in (file_cp.get("delivered") or {}).values() if int(v) > 0]
+        if live_ids:
+            return None, live_ids, "incompatible-plan"
     except UnconfirmedPartError:
         raise
     except Exception as exc:
@@ -173,7 +174,7 @@ async def get_saved_checkpoints(
                         await (store or DEFAULT_TASK_STORE).forget_missing_part(task_id, file_id, part, msg)
                         del result[part]
             return result
-        if file_cp.get("delivered") and client is not None:
+        if any(int(v) > 0 for v in (file_cp.get("delivered") or {}).values()) and client is not None:
             raise UnconfirmedPartError()
     except UnconfirmedPartError:
         raise

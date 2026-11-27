@@ -25,6 +25,7 @@ from app.db.task_repository import TaskQueueRepository
 logger = logging.getLogger(__name__)
 
 _INVALID_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+MAX_INSPECT_RANGE_MESSAGES = 5000
 
 
 def _reraise_task_level_resolution_error(e: Exception) -> None:
@@ -596,10 +597,17 @@ class DownloaderService:
                 "🛡️ 目标频道开启了防转发/受限内容保护 (Restricted Content / NoForwards)，本工具将启用突破限制下载模式"
             )
 
-        # 分批检索消息元数据 (单次最多 100 条)
+        # 分批检索消息元数据 (单次最多 100 条; 单次预检封顶防超大范围耗尽配额)
         chunk_size = 100
-        for first_id in range(start_id, end_id + 1, chunk_size):
-            sub_ids = list(range(first_id, min(first_id + chunk_size, end_id + 1)))
+        scan_end_id = min(end_id, start_id + MAX_INSPECT_RANGE_MESSAGES - 1)
+        if scan_end_id < end_id:
+            history_check_complete = False
+            warning_messages.append(
+                f"⚠️ 预检范围共 {total_range} 条，超过单次预检上限 ({MAX_INSPECT_RANGE_MESSAGES} 条)，"
+                f"已截断仅扫描 {start_id}~{scan_end_id}，剩余 {scan_end_id + 1}~{end_id} 未扫描"
+            )
+        for first_id in range(start_id, scan_end_id + 1, chunk_size):
+            sub_ids = list(range(first_id, min(first_id + chunk_size, scan_end_id + 1)))
             try:
                 msgs = await asyncio.wait_for(userbot.get_messages(entity, ids=sub_ids), timeout=15.0)
                 if msgs is None or len(msgs) != len(sub_ids):

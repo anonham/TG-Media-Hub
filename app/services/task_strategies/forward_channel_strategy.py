@@ -56,8 +56,8 @@ class ForwardChannelStrategy(TaskTypeStrategy):
         start_id = params.get("start_id")
         end_id = params.get("end_id")
         # 普通群历史消息序号随账号变化，必须先在线解析并校验账本归属，再逐批防重。
-        source_text = str(source_chat) if source_chat is not None else ""
-        if source_text.startswith("-") and source_text[1:].isdigit() and -(10**12) < int(source_text) < 0:
+        parsed_source = ForwardService.parse_chat_identifier(source_chat) if source_chat is not None else ""
+        if isinstance(parsed_source, int) and -(10**12) < parsed_source < 0:
             return False, {"dry_run": False}, ""
         if source_chat and target_chat:
             resume_start, resume_mode = ForwardService.compute_resume_start(

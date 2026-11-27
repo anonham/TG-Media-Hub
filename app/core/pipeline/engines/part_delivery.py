@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any
 
-from telethon.errors import BadRequestError, FloodWaitError
+from telethon.errors import BadRequestError, FloodWaitError, ForbiddenError
 
 from app.core.pikpak.taxonomy import PikPakPublishFatalError
 
@@ -34,7 +34,7 @@ async def send_volume_file(client: Any, chat: Any, media: Any, **kwargs: Any) ->
     await receipt(-1)
     try:
         return await client.send_file(chat, media, **kwargs)
-    except (BadRequestError, FloodWaitError):
+    except (BadRequestError, ForbiddenError, FloodWaitError):
         # Telegram rejected the request. Only a confirmed rejection releases this attempt.
         await receipt(0)
         raise

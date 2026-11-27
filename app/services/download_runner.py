@@ -21,6 +21,7 @@ from app.core.runtime import (
     active_task_controls,
     is_task_cancelled,
     is_task_paused,
+    mark_task_executor_exit,
     mark_task_pause_exit,
     release_runner_controls,
     try_claim_executor_entry,
@@ -39,9 +40,27 @@ _FAILED_ITEMS_LOG_LIMIT = 20
 _PAUSED_LOG = "[调度器] 任务已安全暂停，断点已留存，已完全释放网络并发槽位让位"
 
 
+async def _claim_download_terminal(task_id: str, target_status: str) -> bool:
+    """尝试写入下载终态前先标记执行器退出；遇暂停冲突时转交调度器暂停收尾。"""
+    mark_task_executor_exit(task_id)
+    if await TaskQueueRepository.update_status_async(task_id, target_status, from_statuses=("running",)):
+        return True
+    controls = active_task_controls.get(task_id, {})
+    if controls.get("cancelled"):
+        return False
+    if (
+        controls.get("paused")
+        or controls.get("resumed_in_place")
+        or await asyncio.to_thread(TaskQueueRepository.get_status, task_id) == "paused"
+    ):
+        mark_task_pause_exit(task_id)
+        raise TaskPausedError("任务收尾期间已暂停让位")
+    return False
+
+
 async def _finalize_failed_task(task_id: str, failed_items: list[tuple]):
     """部分条目下载失败: 任务整体置 failed 并汇总失败清单, 绝不伪造完成态"""
-    if not await TaskQueueRepository.update_status_async(task_id, "failed", from_statuses=("running",)):
+    if not await _claim_download_terminal(task_id, "failed"):
         return
     sample = "；".join(f"{ident}: {reason}" for ident, reason in failed_items[:_FAILED_ITEMS_LOG_LIMIT])
     more = (
@@ -524,7 +543,7 @@ async def _download_album_members(
 
 async def _finalize_download_completed(task_id: str, state: _DownloadRunState, completion_label: str) -> None:
     """完成态收尾: 状态 + 终态进度回写 + 双广播 (100% 全量完成)"""
-    if not await TaskQueueRepository.update_status_async(task_id, "completed", from_statuses=("running",)):
+    if not await _claim_download_terminal(task_id, "completed"):
         return
     final_bytes = state.cumulative_done_bytes
     await TaskQueueRepository.update_progress_async(

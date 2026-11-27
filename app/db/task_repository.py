@@ -33,6 +33,10 @@ class DuplicateDownloadTaskError(Exception):
         self.retry_source_status: str | None = None
 
 
+class _ManualSkipHistoryConflict(Exception):
+    """Sentinel raised inside commit_manual_skip_if_unchanged to trigger rollback."""
+
+
 def _find_active_download(
     cursor: sqlite3.Cursor, task_type: str, target_key: str, exclude_id: str | None = None
 ) -> DuplicateDownloadTaskError | None:
@@ -764,44 +768,47 @@ class TaskQueueRepository:
         record_history_fn: Callable[[sqlite3.Cursor], Any] | None = None,
     ) -> bool:
         """在独占写事务内按状态与版本 CAS 追加手动跳过记录并可选清理分卷检查点。"""
-        with db_immediate_tx() as cursor:
-            cursor.execute("SELECT status, updated_at, params_json FROM task_queue WHERE id = ?", (task_id,))
-            row = cursor.fetchone()
-            if not row or row[0] != expected_status:
-                return False
-            if expected_updated_at is not None and row[1] != expected_updated_at:
-                return False
-            try:
-                params = json.loads(row[2] or "{}")
-            except Exception:
-                params = {}
-            if not isinstance(params, dict):
-                params = {}
-            existing_skipped = params.get("skipped_files")
-            skipped_list = list(existing_skipped) if isinstance(existing_skipped, list) else []
-            skipped_list.append(skipped_item)
-            params["skipped_files"] = skipped_list
-            if clear_checkpoint_fid:
-                checkpoints = params.get("pikpak_part_checkpoints")
-                if isinstance(checkpoints, dict):
-                    checkpoints.pop(str(clear_checkpoint_fid), None)
-            cursor.execute(
-                "UPDATE task_queue SET params_json = ?, updated_at = ? "
-                "WHERE id = ? AND status = ? AND (? IS NULL OR updated_at = ?)",
-                (
-                    json.dumps(params, ensure_ascii=False),
-                    time.time(),
-                    task_id,
-                    expected_status,
-                    expected_updated_at,
-                    expected_updated_at,
-                ),
-            )
-            if cursor.rowcount != 1:
-                return False
-            if record_history_fn is not None:
-                record_history_fn(cursor)
-            return True
+        try:
+            with db_immediate_tx() as cursor:
+                cursor.execute("SELECT status, updated_at, params_json FROM task_queue WHERE id = ?", (task_id,))
+                row = cursor.fetchone()
+                if not row or row[0] != expected_status:
+                    return False
+                if expected_updated_at is not None and row[1] != expected_updated_at:
+                    return False
+                try:
+                    params = json.loads(row[2] or "{}")
+                except Exception:
+                    params = {}
+                if not isinstance(params, dict):
+                    params = {}
+                existing_skipped = params.get("skipped_files")
+                skipped_list = list(existing_skipped) if isinstance(existing_skipped, list) else []
+                skipped_list.append(skipped_item)
+                params["skipped_files"] = skipped_list
+                if clear_checkpoint_fid:
+                    checkpoints = params.get("pikpak_part_checkpoints")
+                    if isinstance(checkpoints, dict):
+                        checkpoints.pop(str(clear_checkpoint_fid), None)
+                cursor.execute(
+                    "UPDATE task_queue SET params_json = ?, updated_at = ? "
+                    "WHERE id = ? AND status = ? AND (? IS NULL OR updated_at = ?)",
+                    (
+                        json.dumps(params, ensure_ascii=False),
+                        time.time(),
+                        task_id,
+                        expected_status,
+                        expected_updated_at,
+                        expected_updated_at,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    return False
+                if record_history_fn is not None and record_history_fn(cursor) is False:
+                    raise _ManualSkipHistoryConflict()
+                return True
+        except _ManualSkipHistoryConflict:
+            return False
 
     @staticmethod
     def record_part_checkpoint(
@@ -870,9 +877,13 @@ class TaskQueueRepository:
 
     @staticmethod
     def update_album_delivery(
-        task_id: str, members: list[str], *, finish: Callable[[sqlite3.Cursor], None] | None = None
+        task_id: str,
+        members: list[str],
+        *,
+        finish: Callable[[sqlite3.Cursor], None] | None = None,
+        keep_pending: list[str] | None = None,
     ) -> bool:
-        """Reserve a send, or commit its returned receipts and release it in one transaction."""
+        """Reserve a send, or commit its returned receipts and release confirmed members in one transaction."""
         with db_immediate_tx() as cursor:
             row = cursor.execute("SELECT params_json FROM task_queue WHERE id = ?", (task_id,)).fetchone()
             if row is None:
@@ -887,7 +898,10 @@ class TaskQueueRepository:
                 if pending != members:
                     raise ValueError("相册发送记录已变更")
                 finish(cursor)
-                del params["pending_album_delivery"]
+                if keep_pending:
+                    params["pending_album_delivery"] = keep_pending
+                else:
+                    del params["pending_album_delivery"]
             cursor.execute(
                 "UPDATE task_queue SET params_json = ?, updated_at = ? WHERE id = ?",
                 (json.dumps(params, ensure_ascii=False), time.time(), task_id),

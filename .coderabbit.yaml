@@ -1,0 +1,10 @@
+# yaml-language-server: $schema=https://www.coderabbit.ai/integrations/schema.v2.json
+language: "zh-CN"
+reviews:
+  profile: "chill"
+  path_filters:
+    - "!uv.lock"
+    - "!frontend/pnpm-lock.yaml"
+    - "!frontend/src/api/gen/**"
+    - "!tests/api/openapi_snapshot.json"
+    - "!app/assets/**"

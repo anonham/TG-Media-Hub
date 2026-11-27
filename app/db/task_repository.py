@@ -205,6 +205,8 @@ class TaskQueueRepository:
         "get_task_logs",
         "prune_task_logs",
         "record_part_checkpoint",
+        "begin_part_rollback",
+        "forget_missing_part",
         "clear_part_checkpoint",
     )
 
@@ -759,6 +761,7 @@ class TaskQueueRepository:
         skipped_item: dict[str, Any],
         *,
         clear_checkpoint_fid: str = "",
+        record_history_fn: Callable[[sqlite3.Cursor], Any] | None = None,
     ) -> bool:
         """在独占写事务内按状态与版本 CAS 追加手动跳过记录并可选清理分卷检查点。"""
         with db_immediate_tx() as cursor:
@@ -794,7 +797,11 @@ class TaskQueueRepository:
                     expected_updated_at,
                 ),
             )
-            return cursor.rowcount > 0
+            if cursor.rowcount != 1:
+                return False
+            if record_history_fn is not None:
+                record_history_fn(cursor)
+            return True
 
     @staticmethod
     def record_part_checkpoint(
@@ -849,11 +856,75 @@ class TaskQueueRepository:
             if not isinstance(delivered, dict):
                 delivered = {}
                 file_cp["delivered"] = delivered
-            delivered[str(part_index)] = int(msg_id)
+            if msg_id == -1 and str(part_index) in delivered:
+                raise ValueError("分卷已有发送记录，请先核对检查点")
+            if msg_id == 0:
+                if delivered.get(str(part_index)) == -1:
+                    delivered.pop(str(part_index))
+            else:
+                delivered[str(part_index)] = int(msg_id)
             cursor.execute(
                 "UPDATE task_queue SET params_json = ?, updated_at = ? WHERE id = ?",
                 (json.dumps(params, ensure_ascii=False), time.time(), task_id),
             )
+
+    @staticmethod
+    def update_album_delivery(
+        task_id: str, members: list[str], *, finish: Callable[[sqlite3.Cursor], None] | None = None
+    ) -> bool:
+        """Reserve a send, or commit its returned receipts and release it in one transaction."""
+        with db_immediate_tx() as cursor:
+            row = cursor.execute("SELECT params_json FROM task_queue WHERE id = ?", (task_id,)).fetchone()
+            if row is None:
+                return False
+            params = json.loads(row[0] or "{}")
+            pending = params.get("pending_album_delivery")
+            if finish is None:
+                if pending:
+                    raise ValueError("已有相册发送尚待核对")
+                params["pending_album_delivery"] = members
+            else:
+                if pending != members:
+                    raise ValueError("相册发送记录已变更")
+                finish(cursor)
+                del params["pending_album_delivery"]
+            cursor.execute(
+                "UPDATE task_queue SET params_json = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(params, ensure_ascii=False), time.time(), task_id),
+            )
+            return True
+
+    @staticmethod
+    def begin_part_rollback(task_id: str, file_id: str) -> None:
+        if not task_id:
+            return
+        with db_immediate_tx() as cursor:
+            row = cursor.execute("SELECT params_json FROM task_queue WHERE id = ?", (task_id,)).fetchone()
+            if row:
+                params = json.loads(row[0])
+                checkpoint = params.get("pikpak_part_checkpoints", {}).get(file_id)
+                if checkpoint:
+                    checkpoint["rollback_started"] = True
+                    cursor.execute(
+                        "UPDATE task_queue SET params_json = ?, updated_at = ? WHERE id = ?",
+                        (json.dumps(params, ensure_ascii=False), time.time(), task_id),
+                    )
+
+    @staticmethod
+    def forget_missing_part(task_id: str, file_id: str, part: int, msg_id: int) -> None:
+        """Remove only the receipt whose remote absence was confirmed."""
+        with db_immediate_tx() as cursor:
+            row = cursor.execute("SELECT params_json FROM task_queue WHERE id = ?", (task_id,)).fetchone()
+            if not row:
+                return
+            params = json.loads(row[0])
+            delivered = params.get("pikpak_part_checkpoints", {}).get(file_id, {}).get("delivered", {})
+            if delivered.get(str(part)) == msg_id:
+                del delivered[str(part)]
+                cursor.execute(
+                    "UPDATE task_queue SET params_json = ?, updated_at = ? WHERE id = ?",
+                    (json.dumps(params, ensure_ascii=False), time.time(), task_id),
+                )
 
     @staticmethod
     def clear_part_checkpoint(task_id: str, file_id: str) -> None:
@@ -1336,6 +1407,8 @@ class TaskQueueRepository:
     get_task_logs_async = _AsyncFace(get_task_logs)
     prune_task_logs_async = _AsyncFace(prune_task_logs)
     record_part_checkpoint_async = _AsyncFace(record_part_checkpoint)
+    begin_part_rollback_async = _AsyncFace(begin_part_rollback)
+    forget_missing_part_async = _AsyncFace(forget_missing_part)
     clear_part_checkpoint_async = _AsyncFace(clear_part_checkpoint)
     get_ids_by_statuses_async = _AsyncFace(get_ids_by_statuses)
     set_error_detail_async = _AsyncFace(set_error_detail)

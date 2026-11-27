@@ -296,14 +296,11 @@ class PublisherService:
 
         existing_sent_keys = set()
         if task_id:
-            try:
-                from app.db.task_repository import TaskQueueRepository
+            from app.db.task_repository import TaskQueueRepository
 
-                t_row = TaskQueueRepository.get_by_id(task_id)
-                if t_row and t_row.get("params"):
-                    existing_sent_keys = set(t_row["params"].get("sent_placeholder_keys") or [])
-            except Exception as exc:
-                logger.debug("读取本地发布已发送占位卡键列表异常 (非致命): %s", exc)
+            t_row = await TaskQueueRepository.get_by_id_async(task_id)
+            if t_row and t_row.get("params"):
+                existing_sent_keys = set(t_row["params"].get("sent_placeholder_keys") or [])
 
         context = PublishContext(
             task_id=task_id or "",

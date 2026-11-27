@@ -89,6 +89,7 @@ class TransportOutcome:
     retryable_error: bool = False
     retry_after_s: int = 0
     flood_marked: bool = False
+    history_recorded: bool = False
 
 
 @dataclass

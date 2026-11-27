@@ -55,6 +55,10 @@ class ForwardChannelStrategy(TaskTypeStrategy):
         has_pinned_peers = bool(params.get("canonical_source") and params.get("canonical_target"))
         start_id = params.get("start_id")
         end_id = params.get("end_id")
+        # 普通群历史消息序号随账号变化，必须先在线解析并校验账本归属，再逐批防重。
+        source_text = str(source_chat) if source_chat is not None else ""
+        if source_text.startswith("-") and source_text[1:].isdigit() and -(10**12) < int(source_text) < 0:
+            return False, {"dry_run": False}, ""
         if source_chat and target_chat:
             resume_start, resume_mode = ForwardService.compute_resume_start(
                 source_chat,

@@ -139,6 +139,10 @@ class TaskStorePort(Protocol):
         plan_signature: str | None = None,
     ) -> None: ...
 
+    async def begin_part_rollback(self, task_id: str, file_id: str) -> None: ...
+
+    async def forget_missing_part(self, task_id: str, file_id: str, part: int, msg_id: int) -> None: ...
+
     async def clear_part_checkpoint(self, task_id: str, file_id: str) -> None: ...
 
 
@@ -191,6 +195,12 @@ class _DefaultTaskStore:
         await tr_mod.TaskQueueRepository.record_part_checkpoint_async(
             task_id, file_id, strategy, total_parts, threshold, part_index, msg_id, plan_signature=plan_signature
         )
+
+    async def begin_part_rollback(self, task_id: str, file_id: str) -> None:
+        await tr_mod.TaskQueueRepository.begin_part_rollback_async(task_id, file_id)
+
+    async def forget_missing_part(self, task_id: str, file_id: str, part: int, msg_id: int) -> None:
+        await tr_mod.TaskQueueRepository.forget_missing_part_async(task_id, file_id, part, msg_id)
 
     async def clear_part_checkpoint(self, task_id: str, file_id: str) -> None:
         await tr_mod.TaskQueueRepository.clear_part_checkpoint_async(task_id, file_id)

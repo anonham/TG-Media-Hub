@@ -12,6 +12,7 @@ import logging
 import os
 import shutil
 from collections.abc import Awaitable, Callable
+from functools import partial
 from typing import Any, cast
 
 from telethon.errors import FloodWaitError
@@ -62,7 +63,9 @@ from app.core.pipeline.engines._remux import (
     remux_output_filename,
 )
 from app.core.pipeline.engines._types import SendFileKwargs
+from app.core.pipeline.engines.album_delivery import UnconfirmedAlbumError, send_album_segment
 from app.core.pipeline.engines.exceptions import TransportError
+from app.core.pipeline.engines.part_delivery import UnconfirmedPartError, part_receipt_scope, send_volume_file
 from app.core.pipeline.engines.pikpak.split_loop import get_saved_checkpoints
 from app.core.pipeline.models import PublishContext, PublishItem, TransportOutcome
 from app.core.pipeline.utils import (
@@ -212,7 +215,18 @@ async def _upload_single_part(
                 **concurrency_kwargs,
             )
             send_kwargs = _build_raw_send_kwargs(item, part, len(parts), thumb_bytes)
-            sent = await client.send_file(context.target_chat_id, uploaded_media, **send_kwargs)
+            threshold = context.video_split_threshold_bytes or ss_mod.derive_split_threshold(context.is_premium)
+            receipt = partial(
+                engine._store.record_part_checkpoint,
+                context.task_id,
+                item.item_id,
+                "raw",
+                len(parts),
+                threshold,
+                part.part_index,
+            )
+            with part_receipt_scope(receipt if len(parts) > 1 and context.task_id else None):
+                sent = await send_volume_file(client, context.target_chat_id, uploaded_media, **send_kwargs)
             break
         except (UploadCancelledError, UploadPausedError, asyncio.CancelledError):
             raise
@@ -250,15 +264,18 @@ async def _absorb_part_delivery(
     if last_message_id:
         delivered_parts[part.part_index] = last_message_id
         if len(parts) > 1:
-            await engine._store.record_part_checkpoint(
-                context.task_id,
-                item.item_id,
-                "raw",
-                len(parts),
-                raw_threshold,
-                part.part_index,
-                last_message_id,
-            )
+            try:
+                await engine._store.record_part_checkpoint(
+                    context.task_id,
+                    item.item_id,
+                    "raw",
+                    len(parts),
+                    raw_threshold,
+                    part.part_index,
+                    last_message_id,
+                )
+            except Exception as exc:
+                raise UnconfirmedPartError() from exc
         return last_message_id
     if len(parts) > 1:
         raise PikPakPublishFatalError(
@@ -292,9 +309,16 @@ async def upload_parts(
     prior_bytes = 0
 
     raw_threshold = context.video_split_threshold_bytes or ss_mod.derive_split_threshold(context.is_premium)
-    if len(parts) > 1:
+    if context.task_id or len(parts) > 1:
         saved_checkpoints = await get_saved_checkpoints(
-            context.task_id, item.item_id, "raw", len(parts), raw_threshold, store=engine._store
+            context.task_id,
+            item.item_id,
+            "raw",
+            len(parts),
+            raw_threshold,
+            store=engine._store,
+            client=client,
+            chat_id=context.target_chat_id,
         )
         delivered_parts.update(saved_checkpoints)
 
@@ -341,9 +365,6 @@ async def upload_parts(
 
         if len(parts) > 1 and part.part_index < len(parts):
             await _inter_part_breathing_delay(context, part.part_index, len(parts), "Raw")
-
-    if len(parts) > 1 and len(delivered_parts) == len(parts):
-        await engine._store.clear_part_checkpoint(context.task_id, item.item_id)
 
     return last_message_id, last_speed
 
@@ -477,6 +498,8 @@ async def publish_single_item(
         url_provider=_thumb_url_provider,
     )
 
+    if delivered_parts is None:
+        delivered_parts = {}
     try:
         last_message_id, last_speed = await upload_parts(
             engine,
@@ -489,7 +512,8 @@ async def publish_single_item(
             delivered_parts=delivered_parts,
         )
         return TransportOutcome(
-            message_ids=[last_message_id] if last_message_id else [],
+            message_ids=[delivered_parts[i] for i in sorted(delivered_parts)]
+            or ([last_message_id] if last_message_id else []),
             speed_mb_s=last_speed,
             client_label=context.account_display,
         )
@@ -921,6 +945,17 @@ async def send_item(engine: Any, item: PublishItem, context: PublishContext) -> 
         )
 
     if len(parts) == 1 and is_mpegts_remux_candidate(item.name, context):
+        if context.task_id:
+            await get_saved_checkpoints(
+                context.task_id,
+                item.item_id,
+                "raw",
+                1,
+                threshold,
+                store=engine._store,
+                client=client,
+                chat_id=context.target_chat_id,
+            )
         try:
             remux_outcome = await _remux_and_upload_pikpak_ts(engine, client, item, context)
             if remux_outcome is not None:
@@ -1174,22 +1209,15 @@ async def _send_album_handles(
     """成功子集发送 (R3 矩阵): ≥2 组发 Album / ==1 强制单张 Photo (Telethon 1 元素列表静默降级显式堵死);
     组发/单发失败: 该段成员统一记 error_detail outcome (不 raise)。"""
     try:
-        if len(handles) >= 2:
-            sent = await client.send_file(
-                context.target_chat_id,
-                [m for _, m in handles],
-                caption=None,
-                force_document=False,
-            )
-        else:
-            idx0, media0 = handles[0]
-            sent = await client.send_file(
-                context.target_chat_id,
-                media0,
-                caption=items[idx0].name or items[idx0].item_id,
-                force_document=False,
-            )
-    except (UploadCancelledError, UploadPausedError, asyncio.CancelledError):
+        sent, recorded = await send_album_segment(
+            client,
+            context,
+            items,
+            handles,
+            is_pikpak=True,
+            single_caption=items[handles[0][0]].name or items[handles[0][0]].item_id,
+        )
+    except (UnconfirmedAlbumError, UploadCancelledError, UploadPausedError, asyncio.CancelledError):
         raise
     except FloodWaitError as fw_err:
         raise RetryableTaskError(f"相册组发遇 FloodWait: {fw_err}") from fw_err
@@ -1207,6 +1235,7 @@ async def _send_album_handles(
         if msg_id:
             outcomes[idx] = TransportOutcome(
                 message_ids=[msg_id],
+                history_recorded=recorded,
                 speed_mb_s=last_speed,
                 client_label=context.account_display,
             )

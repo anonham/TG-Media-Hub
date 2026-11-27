@@ -71,6 +71,24 @@ class ForwardLedgerRepository:
     """转发防重账本：成功映射 + 处置跳过 + 覆盖区间，三表同一事务落库"""
 
     @staticmethod
+    def bind_basic_group(source: str, account_id: int) -> bool:
+        """普通群的消息序号只在原账号下有效，原子绑定共享账本的所有者。"""
+        key = f"forward_basic_group_owner:{source}"
+        with db_immediate_tx() as cursor:
+            row = cursor.execute("SELECT value FROM system_settings WHERE key = ?", (key,)).fetchone()
+            if row:
+                return row[0] == str(account_id)
+            # 旧覆盖区间没有账号信息，不能将其归入首个尝试恢复的账号。
+            for table in ("forward_history", "forward_skips", "forward_coverage"):
+                if cursor.execute(f"SELECT 1 FROM {table} WHERE source_chat = ? LIMIT 1", (source,)).fetchone():
+                    return False
+            cursor.execute(
+                "INSERT INTO system_settings (key, value, category, updated_at) VALUES (?, ?, 'internal', ?)",
+                (key, str(account_id), time.time()),
+            )
+            return True
+
+    @staticmethod
     def get_processed_ids(source_chat: str, target_chat: str, msg_ids: list[int]) -> set[int]:
         """
         批量判定哪些源消息 ID 已被处理 (成功转发到该目标，或已被目标无关的过滤 skip / 该目标的 bad_id skip 处置)
@@ -91,7 +109,7 @@ class ForwardLedgerRepository:
             cursor.execute(
                 f"SELECT msg_id FROM forward_skips "
                 f"WHERE source_chat = ? AND msg_id IN ({placeholders}) "
-                f"AND (target_chat IS NULL OR target_chat = ?)",
+                f"AND ((target_chat IS NULL AND skip_type != 'bad_id') OR target_chat = ?)",
                 [str(source_chat)] + id_list + [str(target_chat)],
             )
             done.update(r[0] for r in cursor.fetchall())
@@ -242,7 +260,7 @@ class ForwardLedgerRepository:
             cursor.execute(
                 "SELECT msg_id, skip_type FROM forward_skips "
                 "WHERE source_chat = ? AND msg_id >= ? AND msg_id <= ? "
-                "AND (target_chat IS NULL OR target_chat = ?)",
+                "AND ((target_chat IS NULL AND skip_type != 'bad_id') OR target_chat = ?)",
                 (str(source_chat), int(min_id or 0), int(max_id or (1 << 62)), str(target_chat)),
             )
             filtered: list[int] = []
@@ -269,7 +287,7 @@ class ForwardLedgerRepository:
             h_min, h_max = cursor.fetchone()
             cursor.execute(
                 "SELECT MIN(msg_id), MAX(msg_id) FROM forward_skips "
-                "WHERE source_chat = ? AND (target_chat IS NULL OR target_chat = ?)",
+                "WHERE source_chat = ? AND ((target_chat IS NULL AND skip_type != 'bad_id') OR target_chat = ?)",
                 (str(source_chat), str(target_chat)),
             )
             s_min, s_max = cursor.fetchone()
@@ -289,7 +307,7 @@ class ForwardLedgerRepository:
                 " UNION "
                 " SELECT msg_id FROM forward_skips "
                 " WHERE source_chat = ? AND msg_id >= ? AND msg_id <= ? "
-                " AND (target_chat IS NULL OR target_chat = ?)"
+                " AND ((target_chat IS NULL AND skip_type != 'bad_id') OR target_chat = ?)"
                 ")",
                 (
                     str(source_chat),

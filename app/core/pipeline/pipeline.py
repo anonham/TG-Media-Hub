@@ -21,6 +21,7 @@ from app.core.failure_logger import FailureLogger
 from app.core.media_sniff import TS_AMBIGUOUS_EXTENSIONS
 from app.core.pikpak.taxonomy import PikPakPublishError
 from app.core.pipeline.cleanup import NoopCleanupStrategy
+from app.core.pipeline.engines.album_delivery import UnconfirmedAlbumError
 from app.core.pipeline.engines.exceptions import TransportError
 from app.core.pipeline.filtering import BatchFilter
 from app.core.pipeline.interfaces import (
@@ -189,28 +190,30 @@ class PublishPipeline:
         msg_id: int,
         is_pikpak: bool,
         dl_speed: float = 0.0,
+        history_recorded: bool = False,
     ) -> None:
-        if is_pikpak:
-            history_path = f"pikpak://{item.parent_folder_id}/{item.name}"
-            PublishHistoryRepository.record(
-                context.target_chat_id,
-                history_path,
-                item.size_bytes,
-                "",
-                source_type="pikpak",
-                remote_file_id=item.item_id,
-                tg_message_id=msg_id,
-                task_id=context.task_id or "",
-            )
-        else:
-            PublishHistoryRepository.record(
-                context.target_chat_id,
-                item.item_id,
-                item.size_bytes,
-                DownloadHistoryRepository.get_hash_by_path(item.item_id),
-                tg_message_id=msg_id,
-                task_id=context.task_id or "",
-            )
+        if not history_recorded:
+            if is_pikpak:
+                history_path = f"pikpak://{item.parent_folder_id}/{item.name}"
+                PublishHistoryRepository.record(
+                    context.target_chat_id,
+                    history_path,
+                    item.size_bytes,
+                    "",
+                    source_type="pikpak",
+                    remote_file_id=item.item_id,
+                    tg_message_id=msg_id,
+                    task_id=context.task_id or "",
+                )
+            else:
+                PublishHistoryRepository.record(
+                    context.target_chat_id,
+                    item.item_id,
+                    item.size_bytes,
+                    DownloadHistoryRepository.get_hash_by_path(item.item_id),
+                    tg_message_id=msg_id,
+                    task_id=context.task_id or "",
+                )
         counters.published += 1
         b.published += 1
         counters.newly += 1
@@ -295,6 +298,7 @@ class PublishPipeline:
                 - message_ids 空 + error_detail 空 → 既有 J5 哨兵 (padding/短列表) 语义不变。"""
         album_success = 0
         failed_with_detail: list[int] = []
+        empty_outcomes: list[PublishItem] = []
         success_members: list[tuple[Any, ...]] = []
         retryable_detail: str | None = None
         retryable_wait_s = 0
@@ -310,6 +314,7 @@ class PublishPipeline:
                     msg_id=outcome.message_ids[-1],
                     is_pikpak=is_pikpak,
                     dl_speed=outcome.speed_mb_s,
+                    history_recorded=outcome.history_recorded,
                 )
                 album_success += 1
                 success_members.append((sitm, outcome.message_ids[-1]))
@@ -325,7 +330,9 @@ class PublishPipeline:
                 failed_with_detail.append(idx)
             else:
                 # J5: 该子项无有效消息 ID (padding/短 sent_list/D1 引擎二次拦截) → 计入失败零入库
-                await self._record_empty_outcome_failure(sitm, context, b)
+                empty_outcomes.append(sitm)
+        for sitm in empty_outcomes:
+            await self._record_empty_outcome_failure(sitm, context, b)
         b.album_published += album_success
         if album_success and context.task_id:
             album_ok = f"✅ [相册发布成功] {album_success} 张图片"
@@ -677,13 +684,13 @@ class PublishPipeline:
                     else:
                         groupable.append(sitm)
                 chunk = groupable
-                if len(chunk) < 2:
+                if len(chunk) < 2 or getattr(type(self.engine), "send_album", None) is MediaTransportEngine.send_album:
                     # 单图不组相册 (避免 caption/形态歧义), 走单文件循环
                     pending.extend(chunk)
                     continue
                 try:
                     outcomes = await self.engine.send_album(chunk, context)
-                except (UploadCancelledError, UploadPausedError, RetryableTaskError):
+                except (UnconfirmedAlbumError, UploadCancelledError, UploadPausedError, RetryableTaskError):
                     raise
                 except Exception as exc:
                     # 包4 (K4): 三处口径统一 not_found / 执行器兜底 (publish_executor_service
@@ -769,7 +776,7 @@ class PublishPipeline:
     ) -> None:
         image_files: list[PublishItem] = []
         single_files: list[PublishItem] = []
-        if context.album_mode:
+        if context.album_mode and getattr(type(self.engine), "send_album", None) is not MediaTransportEngine.send_album:
             # P0 修复: 按 item.name 扩展名判图片 (is_image_item) —— 本地 item_id=绝对路径
             # 时旧判定本就成立, 收口共享 helper 后两侧语义一致。
             for itm in publishable:
@@ -783,7 +790,7 @@ class PublishPipeline:
             sub_items = image_files[i : i + chunk_size]
             try:
                 outcomes = await self.engine.send_album(sub_items, context)
-            except (UploadCancelledError, UploadPausedError, RetryableTaskError):
+            except (UnconfirmedAlbumError, UploadCancelledError, UploadPausedError, RetryableTaskError):
                 raise
             except Exception as exc:
                 err_msg = f"❌ 图片 Album 发布失败 ({[s.name for s in sub_items]}): {exc}"
@@ -851,6 +858,10 @@ class PublishPipeline:
 
     async def _execute_impl(self, context: PublishContext) -> PublishResult:
         """执行统一发布流水线"""
+        if context.task_id:
+            task = await TaskQueueRepository.get_by_id_async(context.task_id)
+            if task and (task.get("params") or {}).get("pending_album_delivery"):
+                raise UnconfirmedAlbumError()
         batches = await self.source.get_batches(context)
         # 包3 (K3): medium 标识唯一权威 = context.source_type (两门面装配显式设置, 见
         # models.PublishContext 字段注释)。旧的 isinstance 双查 + 死条件 getattr +

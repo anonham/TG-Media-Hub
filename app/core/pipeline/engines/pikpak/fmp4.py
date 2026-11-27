@@ -431,6 +431,10 @@ async def stream_fmp4_volume(
             )
         except (UploadCancelledError, UploadPausedError, asyncio.CancelledError):
             raise
+        except FloodWaitError as exc:
+            raise RetryableTaskError(
+                f"分卷发送遇 FloodWait ({exc.seconds}s)", retry_after=float(exc.seconds or 60)
+            ) from exc
         except (fmp4_mod.PartOversizeError, fmp4_mod.PartDurationInflatedError):
             raise
         except (
@@ -523,7 +527,13 @@ async def replan_fmp4_after_oversize(
             "🧹 动态重规划：物理回滚已发送的 %d 条分卷消息: %s", len(delivered_message_ids), delivered_message_ids
         )
         try:
-            await client.delete_messages(context.target_chat_id, list(delivered_message_ids))
+            from app.core.pipeline.engines.pikpak.split_loop import delete_published_messages
+
+            await task_store.begin_part_rollback(context.task_id, item_id)
+            if not await delete_published_messages(
+                client, context.target_chat_id, delivered_message_ids, propagate_flood_wait=True
+            ):
+                raise RetryableTaskError("无法确认旧分卷已删除")
         except FloodWaitError as fw_err:
             raise RetryableTaskError(
                 f"重规划回滚遇 FloodWait ({fw_err.seconds}s)",

@@ -35,6 +35,7 @@ from app.core.pipeline.engines._remux import (
     remux_output_filename,
 )
 from app.core.pipeline.engines._types import SendFileKwargs
+from app.core.pipeline.engines.album_delivery import UnconfirmedAlbumError, send_album_segment
 from app.core.pipeline.engines.exceptions import TransportError
 from app.core.pipeline.interfaces import (
     DEFAULT_CLIENT_REGISTRY,
@@ -851,21 +852,21 @@ class LocalDiskTransportEngine(MediaTransportEngine):
         发送失败: 该段成员统一记 error_detail outcome (不 raise), 已上传 handle 作废。"""
         try:
             _raise_if_control_signal(context)
-            if len(segment) >= 2:
-                sent = await client.send_file(
-                    context.target_chat_id,
-                    [media for _, media in segment],
-                    caption=None,
-                )
-            else:
-                idx0, media0 = segment[0]
-                sent = await client.send_file(
-                    context.target_chat_id,
-                    media0,
-                    caption=items[idx0].name or os.path.basename(items[idx0].item_id),
-                    force_document=False,
-                )
-        except (UploadCancelledError, UploadPausedError, asyncio.CancelledError, RetryableTaskError):
+            sent, recorded = await send_album_segment(
+                client,
+                context,
+                items,
+                segment,
+                is_pikpak=False,
+                single_caption=items[segment[0][0]].name or os.path.basename(items[segment[0][0]].item_id),
+            )
+        except (
+            UnconfirmedAlbumError,
+            UploadCancelledError,
+            UploadPausedError,
+            asyncio.CancelledError,
+            RetryableTaskError,
+        ):
             raise
         except FloodWaitError as fw_err:
             wait_sec = getattr(fw_err, "seconds", 5) or 5
@@ -899,6 +900,7 @@ class LocalDiskTransportEngine(MediaTransportEngine):
             if msg_id:
                 outcomes[idx] = TransportOutcome(
                     message_ids=[msg_id],
+                    history_recorded=recorded,
                     speed_mb_s=last_speed,
                     client_label=mode_str,
                 )

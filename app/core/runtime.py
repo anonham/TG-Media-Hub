@@ -6,6 +6,7 @@
 - 提供统一执行器入口竞态自检 (try_claim_executor_entry) 与跨线程 check-then-act 互斥守卫
 """
 
+import sqlite3
 import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -308,7 +309,7 @@ def commit_manual_skip_if_unchanged(
     *,
     clear_checkpoint_fid: str = "",
     is_running_fn: Callable[[str], bool] | None = None,
-    record_history_fn: Callable[[], Any] | None = None,
+    record_history_fn: Callable[[sqlite3.Cursor], Any] | None = None,
 ) -> bool:
     """在任务转换锁内原子提交手动跳过账本与跳过记录，防止与重试交错。"""
     from app.db.task_repository import TaskQueueRepository
@@ -316,18 +317,14 @@ def commit_manual_skip_if_unchanged(
     with _task_transition_lock(task_id):
         if is_running_fn is not None and is_running_fn(task_id):
             return False
-        committed = TaskQueueRepository.commit_manual_skip_if_unchanged(
+        return TaskQueueRepository.commit_manual_skip_if_unchanged(
             task_id,
             expected_status,
             expected_updated_at,
             skipped_item,
             clear_checkpoint_fid=clear_checkpoint_fid,
+            record_history_fn=record_history_fn,
         )
-        if not committed:
-            return False
-        if record_history_fn is not None:
-            record_history_fn()
-        return True
 
 
 def try_claim_executor_entry(task_id: str) -> bool:

@@ -12,8 +12,11 @@ from telethon.errors import (
     ChatSendMediaForbiddenError,
     ChatWriteForbiddenError,
     FloodWaitError,
+    MessageIdInvalidError,
     RPCError,
+    SlowModeWaitError,
 )
+from telethon.tl.types import Chat, ChatForbidden
 
 from app.core.client_manager import client_manager
 from app.core.connection_manager import connection_manager
@@ -25,7 +28,7 @@ from app.core.entity_resolver import (
 from app.core.intervals import compute_gaps
 from app.core.redact import redact_telegram_invites
 from app.core.runtime import mark_task_pause_exit, release_runner_controls, set_task_control, try_claim_executor_entry
-from app.core.scheduler import TaskCancelledError, TaskPausedError
+from app.core.scheduler import FatalTaskError, TaskCancelledError, TaskPausedError
 from app.core.session_errors import is_session_invalid_error, report_session_invalid
 from app.db.forward_repository import ForwardLedgerRepository
 from app.db.task_repository import TaskQueueRepository
@@ -299,6 +302,12 @@ class ForwardService:
             state, userbot, source_chat, target_chat, current_account_id, attempted_accounts
         )
         source_key = resolve_canonical_chat_key(source_entity, source_chat)
+        if isinstance(source_entity, (Chat, ChatForbidden)):
+            owner = state.client_account_id
+            if not owner or (account_id and account_id != owner):
+                raise FatalTaskError("普通群组的消息 ID 属于原账号，请使用原账号执行")
+            if not await asyncio.to_thread(ForwardLedgerRepository.bind_basic_group, source_key, owner):
+                raise FatalTaskError("普通群组的旧转发记录无法归属当前账号，请核对原账号")
         target_key = resolve_canonical_chat_key(target_entity, target_chat)
         await asyncio.to_thread(_record_resolved_peer_aliases, source_entity, source_key, source_chat)
         await asyncio.to_thread(_record_resolved_peer_aliases, target_entity, target_key, target_chat)
@@ -676,22 +685,18 @@ async def _handle_forward_send_failure(state: "_ForwardRunState", e: Exception) 
     # 直接上抛让任务进入 failed 并保留未覆盖区间, 不落 bad_id 隔离。
     if isinstance(e, ConnectionError) and "cannot send requests while disconnected" in err_msg.lower():
         return "retry"
-    if isinstance(e, (ConnectionError, TimeoutError, OSError)):
-        await _log_task_event(
-            state,
-            f"❌ 转发遭遇发送结果未知的传输异常 ({type(e).__name__}: {err_msg or 'timeout'})，禁止自动重发，终止本批待核查恢复",
-            "ERROR",
-        )
-        raise e
-    # 瞬态拥塞错误: 指数退避后可重试
-    if isinstance(e, ValueError) and re.fullmatch(r"Request was unsuccessful \d+ time\(s\)", err_msg):
+    if (
+        isinstance(e, (ConnectionError, TimeoutError, OSError))
+        or (isinstance(e, RPCError) and "timeout" in err_msg.lower())
+        or (isinstance(e, ValueError) and re.fullmatch(r"Request was unsuccessful \d+ time\(s\)", err_msg))
+    ):
+        raise FatalTaskError(f"转发结果未知，已停止自动重发，请核对目标频道: {e}") from e
+    if any(term in err_msg.lower() for term in ("workerbusy", "too busy")):
         return "retry"
-    if any(term in err_msg.lower() for term in ["workerbusy", "too busy"]):
-        return "retry"
-    if isinstance(e, RPCError) and "timeout" in err_msg.lower():
-        return "retry"
-    if isinstance(e, RPCError):
+    if isinstance(e, MessageIdInvalidError) or (isinstance(e, RPCError) and e.message == "MESSAGE_ID_INVALID"):
         return "isolate"
+    if isinstance(e, RPCError):
+        raise FatalTaskError(f"转发被 Telegram 拒绝，未隔离消息: {e}") from e
     await _log_task_event(
         state, f"❌ 转发遭遇非 RPC 异常 ({type(e).__name__}: {err_msg})，终止隔离并上抛待恢复", "ERROR"
     )
@@ -761,7 +766,7 @@ async def _forward_sub_batch(
             )
             break
 
-        except FloodWaitError as e:
+        except (FloodWaitError, SlowModeWaitError) as e:
             # 顶级熔断拦截！绝对休眠，严禁轰炸
             wait_time = e.seconds + 2
             await _log_task_event(
@@ -1044,11 +1049,23 @@ async def _resolve_forward_pair(
     userbot 与账号归属同步换血。"""
     from app.core.client_manager import client_manager, is_channel_permission_error
 
+    original_account_id = current_account_id
     while True:
         try:
             source_entity = await ForwardService.resolve_entity(userbot, state.parsed_source)
             target_entity = await ForwardService.resolve_entity(userbot, state.parsed_target)
             _reject_same_peer_pair(source_entity, target_entity)
+            if current_account_id != original_account_id:
+                if isinstance(source_entity, (Chat, ChatForbidden)):
+                    raise FatalTaskError("普通群组不能使用另一个账号的消息范围")
+                if state.task_id and current_account_id is not None:
+                    from app.core.scheduler import task_scheduler
+
+                    task_scheduler.reassign_task_account(state.task_id, original_account_id or 0, current_account_id)
+                    await TaskQueueRepository.update_account_id_async(state.task_id, current_account_id)
+                    await connection_manager.broadcast(
+                        {"type": "task_update", "task_id": state.task_id, "account_id": current_account_id}
+                    )
             return userbot, source_entity, target_entity, current_account_id
         except Exception as e:
             # 账号会话失效: 统一置 failed + 全局事件引导重绑 (区别于普通实体解析失败)
@@ -1068,19 +1085,8 @@ async def _resolve_forward_pair(
                         f"⚠️ 账号 [{old_name}] 无权访问私有频道，已自动无缝故障转移至账号 [{alt_acc.account_name}] 接替执行",
                         "WARNING",
                     )
-                    from app.core.scheduler import task_scheduler
-
-                    # 先存旧账号再换血: reassign 的 old/new 必须是真实的前后账号,
-                    # 传新账号自身会把原账号的配额计数永久虚高 (与 download_runner 口径一致)
-                    old_account_id = current_account_id
                     current_account_id = alt_acc.account_id
                     attempted_accounts.add(current_account_id)
-                    if state.task_id:
-                        task_scheduler.reassign_task_account(state.task_id, old_account_id or 0, alt_acc.account_id)
-                        await TaskQueueRepository.update_account_id_async(state.task_id, current_account_id)
-                        await connection_manager.broadcast(
-                            {"type": "task_update", "task_id": state.task_id, "account_id": current_account_id}
-                        )
                     userbot, state.client_account_id = await _select_forward_userbot(client_manager, current_account_id)
                     continue
 
@@ -1297,6 +1303,8 @@ async def run_forward_channel_task(
             dry_run=dry_run,
             account_id=current_account_id,
         )
+    except _CHANNEL_WIDE_WRITE_ERRORS as exc:
+        raise FatalTaskError(f"转发权限受限: {exc}") from exc
     except ForwardCancelledError:
         logger.info("转发任务 [%s] 已被用户手动取消", task_id)
         raise

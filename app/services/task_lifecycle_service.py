@@ -214,50 +214,51 @@ async def _ensure_skip_placeholder_slot(
     file_size: int,
     skip_reason: str,
 ) -> int:
-    existing_slot = PlaceholderSlotRepository.get_by_identity(target_chat_id, slot_identity, file_size)
-    if existing_slot and existing_slot.get("placeholder_msg_id"):
-        msg_id = int(existing_slot["placeholder_msg_id"])
-        PlaceholderSlotRepository.increment_fail(existing_slot["id"], skip_reason)
-        logger.info("复用既有占位卡 (msg_id: %d, 槽ID: %d), 避免重复发卡刷屏", msg_id, existing_slot["id"])
-        return msg_id
-
-    msg_id = 0
     acc = client_manager.get_account(raw_acc_id or None)
     client = acc.client if acc and acc.is_ready() else None
-    if client:
+    try:
+        existing = await asyncio.to_thread(
+            PlaceholderSlotRepository.get_by_identity, target_chat_id, slot_identity, file_size
+        )
+        if existing:
+            if existing.get("state") == "placeholder_sent":
+                await asyncio.to_thread(PlaceholderSlotRepository.increment_fail, existing["id"], skip_reason)
+                return int(existing.get("placeholder_msg_id") or 0)
+            return 0
+        if not acc or not client:
+            return 0
+        slot_id = await asyncio.to_thread(
+            PlaceholderSlotRepository.insert_new_slot,
+            target_chat_id,
+            slot_identity,
+            file_size,
+            state="sending",
+            client_label=acc.account_name,
+            sender_account_id=acc.account_id,
+            task_id=task_id,
+            fail_reason=skip_reason,
+        )
+        poster_data = await asyncio.to_thread(load_static_poster)
+        caption = PENDING_CARD_TEXT.format(name=file_name)
         try:
-            poster_data = await asyncio.to_thread(load_static_poster)
-            card_caption = PENDING_CARD_TEXT.format(name=file_name)
-            try:
-                entity = await resolve_entity(client, target_chat_id)
-            except Exception:
-                entity = target_chat_id
-            if poster_data:
-                sent_msg = await client.send_file(entity, as_named_stream(poster_data), caption=card_caption)
-            else:
-                sent_msg = await client.send_message(entity, card_caption)
-            msg_id = int(getattr(sent_msg, "id", 0) or 0)
-            logger.info("已在目标频道 [%s] 成功留置跳过占位卡 (msg_id: %d)", target_chat_id, msg_id)
-        except Exception as card_err:
-            logger.warning("留置跳过占位卡异常 (非致命，降级无实体卡): %s", card_err)
-
-    if msg_id:
-        try:
-            PlaceholderSlotRepository.insert_new_slot(
-                target_chat_id,
-                slot_identity,
-                file_size,
-                slot_kind="backfillable",
-                state="placeholder_sent",
-                placeholder_msg_id=msg_id,
-                client_label=acc.account_name if acc else "Userbot",
-                sender_account_id=acc.account_id if acc else 0,
-                task_id=task_id,
-                fail_reason=skip_reason,
-            )
-        except Exception as slot_err:
-            logger.debug("登记跳过占位槽异常 (非致命): %s", slot_err)
-    return msg_id
+            entity = await resolve_entity(client, target_chat_id)
+        except Exception:
+            entity = target_chat_id
+        if poster_data:
+            message = await client.send_file(entity, as_named_stream(poster_data), caption=caption)
+        else:
+            message = await client.send_message(entity, caption)
+        msg_id = int(message.id)
+        if await asyncio.to_thread(
+            PlaceholderSlotRepository.activate_reserved_slot,
+            slot_id,
+            placeholder_msg_id=msg_id,
+            state="placeholder_sent",
+        ):
+            return msg_id
+    except Exception as exc:
+        logger.warning("跳过已提交，占位卡未确认: %s", exc)
+    return 0
 
 
 def _sync_purge_task_files_and_meta(
@@ -734,16 +735,6 @@ class TaskLifecycleService:
         ):
             raise HTTPException(status_code=409, detail="任务状态在跳过期间已变更，请刷新后重试")
 
-        msg_id = await _ensure_skip_placeholder_slot(
-            task_id,
-            task.get("account_id"),
-            target_chat_id,
-            slot_identity,
-            file_name,
-            file_size,
-            skip_reason,
-        )
-
         skipped_item = {
             "file_name": file_name,
             "rel_path": slot_identity,
@@ -760,20 +751,30 @@ class TaskLifecycleService:
             skipped_item,
             clear_checkpoint_fid=fid,
             is_running_fn=task_scheduler.is_task_running,
-            record_history_fn=partial(
-                PublishHistoryRepository.record,
+            record_history_fn=lambda cursor: PublishHistoryRepository.record(
                 target_chat_id,
                 slot_identity,
                 file_size,
                 "",
                 source_type=source_type,
                 remote_file_id=fid if fid else "",
-                tg_message_id=msg_id,
+                tg_message_id=0,
                 task_id=task_id,
+                transaction=cursor,
             ),
         )
         if not committed:
             raise HTTPException(status_code=409, detail="任务状态在跳过期间已变更，请刷新后重试")
+
+        msg_id = await _ensure_skip_placeholder_slot(
+            task_id,
+            task.get("account_id"),
+            target_chat_id,
+            slot_identity,
+            file_name,
+            file_size,
+            skip_reason,
+        )
 
         card_tip = f"并在频道留置 ⏳ 待回填占位卡 (msg #{msg_id})" if msg_id else "（未留置实体占位卡）"
         log_text = f"⏭️ [用户操作] 用户手动跳过文件 [{file_name}] {card_tip}，防重账本已生效，后续调度将自动跳过"

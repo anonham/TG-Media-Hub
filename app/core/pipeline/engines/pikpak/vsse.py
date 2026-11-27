@@ -1,6 +1,7 @@
 """统一发布流水线传输引擎 - PikPak VSSE 零重编码虚拟分卷通道"""
 
 import asyncio
+import hashlib
 import io
 import logging
 import struct
@@ -465,8 +466,12 @@ class VsseSplitChannel(SplitChannel):
     def plan_volumes(self, force_parts: int | None = None) -> list[VsseVolumePlan]:
         return self.plans
 
-    def get_plan_signature(self, plans: Sequence[SplitVolumePlan]) -> str | None:
-        return None
+    def get_plan_signature(self, plans: Sequence[SplitVolumePlan]) -> str:
+        digest = hashlib.sha256()
+        for part, header in zip(self.plans, self.synthesized_headers, strict=True):
+            digest.update(struct.pack(">QQQQ", part.part_index, part.envelope_start, part.envelope_length, len(header)))
+            digest.update(header)
+        return digest.hexdigest()
 
     def get_cached_volume_bytes(self, plan_idx: int, plan: SplitVolumePlan) -> int:
         # 信封长度属通道私有面: 经自持具体 plan 列表读取 (与传入 plan 为同一对象)

@@ -3,9 +3,11 @@
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Sequence
+from functools import partial
 from typing import Any
 
 from telethon.errors import FloodWaitError
+from telethon.tl.types import MessageEmpty
 
 from app.core import fmp4_pipe_uploader as fmp4_mod
 from app.core import stream_chunk_provider as scp_mod
@@ -25,6 +27,7 @@ from app.core.pipeline.engines._common import (
     _raise_if_control_signal,
 )
 from app.core.pipeline.engines._types import SplitChannel, SplitVolumePlan, VolumeJob
+from app.core.pipeline.engines.part_delivery import UnconfirmedPartError, part_receipt_scope
 from app.core.pipeline.interfaces import DEFAULT_TASK_STORE, TaskStorePort
 from app.core.pipeline.models import PublishContext, PublishItem, TransportOutcome
 from app.core.scheduler import RetryableTaskError, UploadCancelledError, UploadPausedError
@@ -45,6 +48,10 @@ async def delete_published_messages(
     logger.warning("⚠️ 发布中断或失败，正在物理回滚清理已发送的 %d 条孤儿消息: %s", len(message_ids), message_ids)
     try:
         await client.delete_messages(chat_id, list(message_ids))
+        remaining = await read_live_message_ids(client, chat_id, message_ids)
+        if remaining:
+            logger.warning("目标仍存在分卷消息: %s", remaining)
+            return False
         logger.info("✅ 已成功清理孤儿消息: %s", message_ids)
         return True
     except FloodWaitError as del_fw:
@@ -55,6 +62,28 @@ async def delete_published_messages(
     except Exception as del_err:
         logger.warning("清理孤儿消息失败: %s", del_err)
         return False
+
+
+async def read_live_message_ids(client: Any, chat_id: Any, ids: list[int]) -> set[int]:
+    """Telethon preserves the requested positions and returns None for missing IDs."""
+    live: set[int] = set()
+    for offset in range(0, len(ids), 100):
+        batch = ids[offset : offset + 100]
+        messages = await client.get_messages(chat_id, ids=batch)
+        if not isinstance(messages, (list, tuple)) or len(messages) != len(batch):
+            raise RetryableTaskError("无法核实分卷消息状态")
+        for expected, msg in zip(batch, messages, strict=True):
+            if msg is None or isinstance(msg, MessageEmpty):
+                continue
+            if msg.id != expected:
+                raise RetryableTaskError("分卷消息回读 ID 不匹配")
+            live.add(expected)
+    return live
+
+
+def _check_delivery_state(checkpoint: dict[str, Any]) -> None:
+    if any(int(value) < 0 for value in (checkpoint.get("delivered") or {}).values()):
+        raise UnconfirmedPartError()
 
 
 async def _peek_checkpoint_resume_info(
@@ -79,6 +108,7 @@ async def _peek_checkpoint_resume_info(
         file_cp = checkpoints.get(str(file_id))
         if not file_cp or not isinstance(file_cp, dict):
             return None, [], None
+        _check_delivery_state(file_cp)
         if file_cp.get("strategy") == strategy and file_cp.get("threshold") == threshold:
             delivered = file_cp.get("delivered") or {}
             msg_ids = [int(v) for v in delivered.values() if v]
@@ -86,6 +116,10 @@ async def _peek_checkpoint_resume_info(
             raw_sig = file_cp.get("plan_signature")
             plan_sig = raw_sig if isinstance(raw_sig, str) and raw_sig else None
             return (total_parts if total_parts > 0 else None), msg_ids, plan_sig
+        if file_cp.get("delivered"):
+            return None, list(map(int, file_cp["delivered"].values())), "incompatible-plan"
+    except UnconfirmedPartError:
+        raise
     except Exception as exc:
         raise RetryableTaskError("无法读取分卷检查点元数据，保留检查点等待重试") from exc
     return None, [], None
@@ -100,6 +134,8 @@ async def get_saved_checkpoints(
     store: TaskStorePort | None = None,
     *,
     plan_signature: str | None = None,
+    client: Any = None,
+    chat_id: Any = None,
 ) -> dict[int, int]:
     """读取任务持久化分卷检查点: 校验 strategy, total_parts, threshold 与切分边界签名一致性。
 
@@ -117,6 +153,7 @@ async def get_saved_checkpoints(
         file_cp = checkpoints.get(str(file_id))
         if not file_cp or not isinstance(file_cp, dict):
             return {}
+        _check_delivery_state(file_cp)
         raw_sig = file_cp.get("plan_signature")
         saved_sig = raw_sig if isinstance(raw_sig, str) and raw_sig else None
         if (
@@ -126,13 +163,28 @@ async def get_saved_checkpoints(
             and saved_sig == plan_signature
         ):
             delivered = file_cp.get("delivered") or {}
-            return {int(k): int(v) for k, v in delivered.items()}
+            result = {int(k): int(v) for k, v in delivered.items() if int(v) > 0}
+            if result and file_cp.get("rollback_started"):
+                if client is None:
+                    raise RetryableTaskError("需回读目标消息以核对分卷回滚")
+                live = await read_live_message_ids(client, chat_id, list(result.values()))
+                for part, msg in list(result.items()):
+                    if msg not in live:
+                        await (store or DEFAULT_TASK_STORE).forget_missing_part(task_id, file_id, part, msg)
+                        del result[part]
+            return result
+        if file_cp.get("delivered") and client is not None:
+            raise UnconfirmedPartError()
+    except UnconfirmedPartError:
+        raise
     except Exception as exc:
         raise RetryableTaskError("无法读取分卷检查点，保留检查点等待重试") from exc
     return {}
 
 
 _PRESERVE_DELIVERY_EXC_TYPES = (
+    UnconfirmedPartError,
+    FloodWaitError,
     UploadPausedError,
     scp_mod.PikPakThrottledError,
     PikPakPublishThrottledError,
@@ -172,7 +224,7 @@ async def _dispose_failed_delivery(
     """失败处置: 严格回滚谓词 → 非惩罚性保全 / 物理回滚 +
     检查点清理, 末尾统一 fail_pending_parts。"""
     # 严格回滚谓词: 显式取消或致命不可恢复异常物理回滚; 暂停/冷却/风控/瞬态重试一律非惩罚性保全已发分卷
-    if _should_preserve_delivered_volumes(context, last_split_exc):
+    if isinstance(last_split_exc, UnconfirmedPartError) or _should_preserve_delivered_volumes(context, last_split_exc):
         if delivered_message_ids:
             logger.info(
                 "🛡️ %s 非惩罚性保全: 任务中断 (暂停/冷却/重试)，保全已交付的 %d 条分卷消息 (IDs: %s)",
@@ -182,6 +234,7 @@ async def _dispose_failed_delivery(
             )
     elif delivered_message_ids:
         # 直调模块函数 (原经 channel.engine 属性 getattr 的测试兼容垫片废除)
+        await task_store.begin_part_rollback(context.task_id, item.item_id)
         deleted_ok = await delete_published_messages(client, context.target_chat_id, delivered_message_ids)
         if deleted_ok:
             capture_session.mark_rolled_back()
@@ -272,6 +325,7 @@ async def _reconcile_resume_plan_count(
             len(saved_delivered_ids),
         )
         try:
+            await task_store.begin_part_rollback(context.task_id, item.item_id)
             deleted_ok = await delete_published_messages(
                 client,
                 context.target_chat_id,
@@ -364,14 +418,29 @@ async def _persist_checkpoint_with_compensation(
             if cp_attempt == 0:
                 continue
             if msg_id:
+                try:
+                    await task_store.begin_part_rollback(context.task_id, item.item_id)
+                except Exception as mark_err:
+                    raise UnconfirmedPartError() from mark_err
                 comp_ok = await delete_published_messages(client, context.target_chat_id, [msg_id])
                 if comp_ok:
+                    await _persist_part_checkpoint(
+                        task_store=task_store,
+                        context=context,
+                        item=item,
+                        channel=channel,
+                        total_parts=total_parts,
+                        threshold=threshold,
+                        part_index=part_index,
+                        msg_id=0,
+                        plan_signature=plan_signature,
+                    )
                     if msg_id in delivered_message_ids:
                         delivered_message_ids.remove(msg_id)
                     raise RetryableTaskError(
                         f"分卷 Part {part_index}/{total_parts} 检查点落盘失败，已回滚当前分卷等待重试: {cp_err}"
                     ) from cp_err
-            raise
+            raise UnconfirmedPartError() from cp_err
 
 
 def _record_checkpoint_hit(
@@ -435,6 +504,8 @@ async def _reconcile_and_load_checkpoints(
     )
     if replan_count == 0:
         delivered_message_ids[:] = list(dict.fromkeys(reconciled_ids)) if reconciled_ids else []
+    if saved_delivered_ids and not reconciled_ids:
+        return [], {}
     saved_checkpoints = await get_saved_checkpoints(
         context.task_id,
         item.item_id,
@@ -443,7 +514,11 @@ async def _reconcile_and_load_checkpoints(
         threshold,
         store=task_store,
         plan_signature=plan_signature,
+        client=client,
+        chat_id=context.target_chat_id,
     )
+    if replan_count == 0:
+        delivered_message_ids[:] = [msg for msg in delivered_message_ids if msg in saved_checkpoints.values()]
     return reconciled_ids, saved_checkpoints
 
 
@@ -534,13 +609,24 @@ async def execute_split_loop(
                 )
 
                 try:
-                    msg_id, volume_bytes, volume_speed = await channel.stream_part(
-                        job=job,
-                        client=client,
-                        context=context,
-                        capture_session=capture_session,
-                        reporter=reporter,
+                    receipt = partial(
+                        task_store.record_part_checkpoint,
+                        context.task_id,
+                        item.item_id,
+                        channel.channel_name,
+                        len(plans),
+                        threshold,
+                        plan.part_index,
+                        plan_signature=plan_signature,
                     )
+                    with part_receipt_scope(receipt if context.task_id else None):
+                        msg_id, volume_bytes, volume_speed = await channel.stream_part(
+                            job=job,
+                            client=client,
+                            context=context,
+                            capture_session=capture_session,
+                            reporter=reporter,
+                        )
                 except (fmp4_mod.PartOversizeError, fmp4_mod.PartDurationInflatedError) as pe:
                     last_part_exc = pe
                     logger.warning(
@@ -591,8 +677,8 @@ async def execute_split_loop(
                 prior_bytes = 0
                 continue
 
+            # 文件级历史提交后由 PublishPipeline 清理，跨越发送成功到入账之间的窗口。
             publish_success = True
-            await task_store.clear_part_checkpoint(context.task_id, item.item_id)
             break
 
         return TransportOutcome(

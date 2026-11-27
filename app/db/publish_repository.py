@@ -3,14 +3,16 @@
 import os
 import posixpath
 import re
+import sqlite3
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any
 
 from app.db.database import db_cursor
 
 # 占位槽可行动态 (跨任务槽复用保留态): 任务级联清理与 delete_terminal_by_task 共用此排除口径 (单点)
-SLOT_ACTIVE_STATES_SQL = "state NOT IN ('placeholder_sent', 'editing')"
+SLOT_ACTIVE_STATES_SQL = "state NOT IN ('sending', 'placeholder_sent', 'editing')"
 
 _WIN_DRIVE_PATH_RE = re.compile(r"^[A-Za-z]:[/\\]")
 
@@ -144,6 +146,7 @@ class PublishHistoryRepository:
         remote_file_id: str = "",
         tg_message_id: int = 0,
         task_id: str = "",
+        transaction: sqlite3.Cursor | None = None,
     ):
         """记录文件发送历史 (file_hash 缺省 '' 时按旧键语义记录)。
 
@@ -154,7 +157,7 @@ class PublishHistoryRepository:
         写入侧路径归一: file_path 统一经 norm_file_path 落库,
         查询侧单值等值完整命中 UNIQUE 前缀索引 (is_published 同口径)。
         """
-        with db_cursor(commit=True) as cursor:
+        with nullcontext(transaction) if transaction is not None else db_cursor(commit=True) as cursor:
             common_params = (
                 str(target_chat_id),
                 norm_file_path(file_path),

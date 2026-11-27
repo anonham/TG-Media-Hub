@@ -23,6 +23,7 @@ from app.core.pikpak.taxonomy import (
 )
 from app.core.pipeline.engines._types import SendFileKwargs, SplitVolumePlan
 from app.core.pipeline.engines.exceptions import VsseProbeContext
+from app.core.pipeline.engines.part_delivery import send_volume_file
 from app.core.pipeline.interfaces import (
     DEFAULT_CLIENT_REGISTRY,
     DEFAULT_TASK_STORE,
@@ -599,7 +600,7 @@ async def _send_file_with_floodwait_retry(
         if "thumb" in send_kwargs and hasattr(send_kwargs["thumb"], "seek"):
             send_kwargs["thumb"].seek(0)
         try:
-            sent = await client.send_file(chat_id, media, **send_kwargs)
+            sent = await send_volume_file(client, chat_id, media, **send_kwargs)
             break
         except (UploadCancelledError, UploadPausedError, asyncio.CancelledError):
             raise

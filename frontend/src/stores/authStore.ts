@@ -38,6 +38,7 @@ export const useAuthStore = defineStore('auth', () => {
   const failedAttempts = ref<number>(0)
   const lockCountdown = ref<number>(0)
   let timerId: ReturnType<typeof setInterval> | null = null
+  let credentialGeneration = 0
 
   const isLocked = computed<boolean>(() => lockCountdown.value > 0)
 
@@ -58,9 +59,10 @@ export const useAuthStore = defineStore('auth', () => {
   async function checkAuthStatus(): Promise<boolean> {
     const tgAuthStore = useTelegramAuthStore()
     const read = tgAuthStore.captureAdmissionRead()
+    const credGen = credentialGeneration
     try {
       const res = await authApi.getStatus()
-      if (!tgAuthStore.isAdmissionReadCurrent(read)) return false
+      if (!tgAuthStore.isAdmissionReadCurrent(read) || credGen !== credentialGeneration) return false
       tgAuthStore.syncAdmissionStatus(res.data, read)
       isAuthRequired.value = Boolean(res.data?.auth_required)
 
@@ -80,7 +82,7 @@ export const useAuthStore = defineStore('auth', () => {
 
       if (apiKey.value) {
         const verifyOutcome = await verifyKey(apiKey.value)
-        if (!tgAuthStore.isAdmissionReadCurrent(read)) return false
+        if (!tgAuthStore.isAdmissionReadCurrent(read) || credGen !== credentialGeneration) return false
         isAuthChecked.value = true
         if (verifyOutcome === 'valid') {
           isKeyVerified.value = true
@@ -100,7 +102,7 @@ export const useAuthStore = defineStore('auth', () => {
         return false
       }
     } catch (err) {
-      if (!tgAuthStore.isAdmissionReadCurrent(read)) return false
+      if (!tgAuthStore.isAdmissionReadCurrent(read) || credGen !== credentialGeneration) return false
       console.error('检查鉴权状态失败:', err)
       isAuthChecked.value = true
       return false
@@ -127,6 +129,7 @@ export const useAuthStore = defineStore('auth', () => {
 
     const outcome = await verifyKey(cleanKey)
     if (outcome === 'valid') {
+      credentialGeneration += 1
       apiKey.value = cleanKey
       isKeyVerified.value = true
       rememberMe.value = remember
@@ -164,6 +167,7 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   function clearAuthKey(): void {
+    credentialGeneration += 1
     apiKey.value = ''
     isKeyVerified.value = false
     rememberMe.value = false

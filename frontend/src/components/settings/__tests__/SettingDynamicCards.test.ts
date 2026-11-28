@@ -55,4 +55,64 @@ describe('SettingDynamicCards', () => {
     wrapper.unmount()
     vi.restoreAllMocks()
   })
+
+  it('exposes item.title as an accessible name on switch, select, number, and text controls', () => {
+    setActivePinia(createPinia())
+
+    const cards: SettingCard[] = [
+      {
+        key: 'a11y',
+        title: '无障碍校验卡片',
+        items: [
+          {
+            key: 'enable_transit_acceleration',
+            title: '启用开关标题',
+            description: 'd1',
+            meta: { type: 'switch' },
+          },
+          {
+            key: 'pikpak_default_cleanup_mode',
+            title: '下拉选择标题',
+            description: 'd2',
+            meta: {
+              options: [
+                { label: '保留', value: 'none' },
+                { label: '归档', value: 'archive' },
+              ],
+            },
+          },
+          {
+            key: 'max_global_concurrency',
+            title: '数字输入标题',
+            description: 'd3',
+          },
+          {
+            key: 'transit_chat_id',
+            title: '文本输入标题',
+            description: 'd4',
+          },
+        ],
+      },
+    ]
+
+    const wrapper = mount(SettingDynamicCards, {
+      props: {
+        cards,
+        formValues: {
+          enable_transit_acceleration: 'true',
+          pikpak_default_cleanup_mode: 'archive',
+          max_global_concurrency: '5',
+          transit_chat_id: '-1001',
+        },
+      },
+    })
+
+    expect(wrapper.get('[role="switch"]').attributes('aria-label')).toBe('启用开关标题')
+    expect(wrapper.get('.n-base-selection-label[tabindex]').attributes('aria-label')).toBe('下拉选择标题')
+    const inputs = wrapper.findAll('input')
+    expect(inputs.map((el) => el.attributes('aria-label'))).toEqual(['数字输入标题', '文本输入标题'])
+
+    wrapper.unmount()
+    vi.restoreAllMocks()
+  })
 })

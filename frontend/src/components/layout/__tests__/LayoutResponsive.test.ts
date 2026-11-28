@@ -179,4 +179,48 @@ describe('Layout responsive and accessibility regressions', () => {
 
     wrapper.unmount()
   })
+
+  it('stops polling and WebSocket when a 401 hard-locks the layout after soft 2FA expiry', async () => {
+    const authStore = useAuthStore()
+    const tgAuthStore = useTelegramAuthStore()
+    const taskStore = useTaskStore()
+
+    authStore.apiKey = 'valid-key'
+    authStore.isAuthRequired = true
+    authStore.isAuthChecked = true
+    authStore.isKeyVerified = true
+    tgAuthStore.admissionPhase = 'admitted'
+    tgAuthStore.isWeb2FAUnlocked = true
+
+    vi.spyOn(authStore, 'checkAuthStatus').mockResolvedValue(true)
+    vi.spyOn(tgAuthStore, 'fetchStatus').mockResolvedValue(true)
+    vi.spyOn(taskStore, 'startPolling').mockImplementation(() => {})
+    vi.spyOn(taskStore, 'initWebSocket').mockResolvedValue(undefined)
+    const stopSpy = vi.spyOn(taskStore, 'stopPolling').mockImplementation(() => {})
+
+    const wrapper = mount(AppLayout, {
+      global: {
+        stubs: {
+          NButton: { template: '<button><slot /></button>' },
+          NAlert: { template: '<div><slot /></div>' },
+          NIcon: { template: '<i><slot /></i>' },
+          NTooltip: NTooltipStub,
+          RouterLink: RouterLinkStub,
+          RouterView: { template: '<div data-testid="router-view-mounted" />' },
+        },
+      },
+    })
+
+    // 1. Soft 2FA expiry: isReady becomes false, isHardLocked stays false (degraded polling keeps running)
+    tgAuthStore.isWeb2FAUnlocked = false
+    await nextTick()
+    expect(stopSpy).not.toHaveBeenCalled()
+
+    // 2. Subsequent 401 clears isKeyVerified -> transitions to isHardLocked -> must stopPolling()
+    authStore.handle401Error()
+    await nextTick()
+    expect(stopSpy).toHaveBeenCalledTimes(1)
+
+    wrapper.unmount()
+  })
 })

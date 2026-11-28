@@ -203,6 +203,12 @@ watch(
   { immediate: true },
 )
 
+watch(isHardLocked, (locked) => {
+  if (locked) {
+    taskStore.stopPolling()
+  }
+})
+
 onUnmounted(() => taskStore.stopPolling())
 
 onMounted(async () => {

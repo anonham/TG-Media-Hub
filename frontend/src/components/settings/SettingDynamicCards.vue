@@ -82,12 +82,14 @@
               </n-tag>
               <n-switch
                 v-else-if="item.meta?.type === 'switch'"
+                v-control-label="item.title"
                 :value="isEnabledValue(formValues[item.key])"
                 :disabled="Boolean(item.meta?.readOnly)"
                 @update:value="(value) => emit('update:value', item.key, value ? 'true' : 'false')"
               />
               <n-select
                 v-else-if="item.meta?.options"
+                v-control-label="item.title"
                 :value="formValues[item.key] as string | number | null | undefined"
                 :options="item.meta.options"
                 size="small"
@@ -100,6 +102,7 @@
                 :min="getMinVal(item.key)"
                 :max="getMaxVal(item.key)"
                 :step="getStepVal(item.key)"
+                :input-props="{ 'aria-label': item.title }"
                 size="small"
                 class="responsive-control-md"
                 @update:value="(val) => emit('update:value', item.key, val)"
@@ -107,6 +110,7 @@
               <n-input
                 v-else
                 :value="formValues[item.key] != null ? String(formValues[item.key]) : ''"
+                :input-props="{ 'aria-label': item.title }"
                 size="small"
                 class="responsive-control-md"
                 @update:value="(val) => emit('update:value', item.key, val)"
@@ -149,6 +153,27 @@ const emit = defineEmits<{
 }>()
 
 const authStore = useAuthStore()
+
+function applyControlAccessibleName(el: HTMLElement, label?: string) {
+  const trigger = el.matches('[role="switch"]')
+    ? el
+    : el.querySelector<HTMLElement>('.n-base-selection-label[tabindex], input')
+  if (!trigger) return
+  if (label) {
+    trigger.setAttribute('aria-label', label)
+  } else {
+    trigger.removeAttribute('aria-label')
+  }
+}
+
+const vControlLabel = {
+  mounted(el: HTMLElement, binding: { value?: string }) {
+    applyControlAccessibleName(el, binding.value)
+  },
+  updated(el: HTMLElement, binding: { value?: string }) {
+    applyControlAccessibleName(el, binding.value)
+  },
+}
 
 function isEnabledValue(value: unknown): boolean {
   return value === true || ['true', '1', 'yes', 'on'].includes(String(value).toLowerCase())

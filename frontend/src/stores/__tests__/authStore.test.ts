@@ -99,4 +99,65 @@ describe('authStore Unit Tests', () => {
     expect(await auth.submitAuthKey('wrong-key')).toBe(false)
     expect(auth.failedAttempts).toBe(1)
   })
+
+  it('discards stale invalid checkAuthStatus verification after submitAuthKey succeeds', async () => {
+    localStorage.setItem('tg_hub_api_key_remember', JSON.stringify({ key: 'old-key', expires: Date.now() + 60_000 }))
+    const auth = useAuthStore()
+    vi.mocked(authApi.getStatus).mockResolvedValueOnce({
+      data: { restricted: false, auth_required: true },
+    } as never)
+
+    let rejectOldVerify!: (err: unknown) => void
+    vi.mocked(authApi.verify)
+      .mockImplementationOnce(
+        () =>
+          new Promise((_, reject) => {
+            rejectOldVerify = reject
+          }) as never,
+      )
+      .mockResolvedValueOnce({ status: 200 } as never)
+
+    const pendingCheck = auth.checkAuthStatus()
+    await vi.waitFor(() => expect(authApi.verify).toHaveBeenCalledTimes(1))
+
+    expect(await auth.submitAuthKey('new-key')).toBe(true)
+    expect(auth.isKeyVerified).toBe(true)
+    expect(auth.isModalVisible).toBe(false)
+
+    rejectOldVerify({ response: { status: 401 } })
+    expect(await pendingCheck).toBe(false)
+    expect(auth.apiKey).toBe('new-key')
+    expect(auth.isKeyVerified).toBe(true)
+    expect(auth.isModalVisible).toBe(false)
+  })
+
+  it('discards stale valid checkAuthStatus verification after clearAuthKey', async () => {
+    localStorage.setItem('tg_hub_api_key_remember', JSON.stringify({ key: 'old-key', expires: Date.now() + 60_000 }))
+    const auth = useAuthStore()
+    vi.mocked(authApi.getStatus).mockResolvedValueOnce({
+      data: { restricted: false, auth_required: true },
+    } as never)
+
+    let resolveOldVerify!: (val: unknown) => void
+    vi.mocked(authApi.verify).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveOldVerify = resolve
+        }) as never,
+    )
+
+    const pendingCheck = auth.checkAuthStatus()
+    await vi.waitFor(() => expect(authApi.verify).toHaveBeenCalledTimes(1))
+
+    auth.clearAuthKey()
+    expect(auth.apiKey).toBe('')
+    expect(auth.isKeyVerified).toBe(false)
+    expect(auth.isModalVisible).toBe(true)
+
+    resolveOldVerify({ status: 200 })
+    expect(await pendingCheck).toBe(false)
+    expect(auth.apiKey).toBe('')
+    expect(auth.isKeyVerified).toBe(false)
+    expect(auth.isModalVisible).toBe(true)
+  })
 })

@@ -1,0 +1,65 @@
+# ==============================================================================
+# tg-media-hub Docker 打包排除规则 (.dockerignore)
+# 保证镜像轻量化，严防敏感凭据与 Session 文件泄露
+# ==============================================================================
+
+# 1. 敏感凭证与 Telegram Session 数据库（最高安全级别保护）
+.env
+.env.*
+!.env.example
+*.session
+*.session-journal
+*.session-wal
+*.session-shm
+**/.telegram-handover
+**/.pikpak
+**/*.har
+**/trace.zip
+**/playwright/.auth
+
+# 2. 持久化数据与本地下载资产
+data/
+downloads/
+private/
+*.db
+*.sqlite
+*.sqlite3
+
+# 3. Python 编译缓存与测试产物
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+pytest-cache-files-*/
+.coverage
+htmlcov/
+tests/
+
+# 4. Python 虚拟环境与打包目录
+.venv/
+.venv*/
+.conda/
+venv/
+env/
+ENV/
+build/
+dist/
+*.egg-info/
+
+# 5. 前端本地依赖与临时缓存（源码保留由 Docker Stage 1 编译）
+frontend/node_modules/
+frontend/dist/
+frontend/dist-ssr/
+frontend/*.local
+frontend/coverage/
+
+# 6. IDE / 编辑器与操作系统垃圾文件
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+.git
+.gitignore

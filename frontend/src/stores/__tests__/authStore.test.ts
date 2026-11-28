@@ -120,12 +120,15 @@ describe('authStore Unit Tests', () => {
     const pendingCheck = auth.checkAuthStatus()
     await vi.waitFor(() => expect(authApi.verify).toHaveBeenCalledTimes(1))
 
+    expect(auth.isAuthChecked).toBe(true)
+    expect(auth.isKeyVerified).toBe(false)
     expect(await auth.submitAuthKey('new-key')).toBe(true)
     expect(auth.isKeyVerified).toBe(true)
     expect(auth.isModalVisible).toBe(false)
 
     rejectOldVerify({ response: { status: 401 } })
     expect(await pendingCheck).toBe(false)
+    expect(auth.isAuthChecked).toBe(true)
     expect(auth.apiKey).toBe('new-key')
     expect(auth.isKeyVerified).toBe(true)
     expect(auth.isModalVisible).toBe(false)

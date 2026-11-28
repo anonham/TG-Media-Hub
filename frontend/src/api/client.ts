@@ -5,6 +5,12 @@ import { useTelegramAuthStore } from '@/stores/telegramAuthStore'
 import { message } from '@/utils/discreteApi'
 import { errDetail } from '@/utils/errors'
 
+declare module 'axios' {
+  interface AxiosRequestConfig {
+    authVerificationGeneration?: number
+  }
+}
+
 // throwOnError 必须全局开启: gen 客户端默认把 AxiosError 作为正常值 resolve (不抛出),
 // 会让全部调用方的 catch 分支静默失效; 开启后错误语义与原手写 axios 层一致。
 // timeout 30000 对齐原 axios.create({ timeout: 30000 }), 长轮询请求按需在调用点覆盖。
@@ -55,7 +61,14 @@ client.instance.interceptors.response.use(
     if (resp && resp.status === 401 && !isThirdPartyAuth && !isBootstrapRoute && !isTelegramChallengeError) {
       // API Key 失效: 引导重输访问口令
       const authStore = useAuthStore()
-      authStore.handle401Error()
+      const generation = error.config?.authVerificationGeneration
+      if (
+        generation === undefined ||
+        (generation === authStore.getCredentialGeneration() &&
+          error.config.headers.get('X-API-Key') === authStore.apiKey)
+      ) {
+        authStore.handle401Error()
+      }
     } else if (resp && resp.status === 403 && String(resp.data?.detail || '').startsWith('2FA')) {
       // 2FA 会话失效 (detail 以 "2FA" 开头为后端契约): 引导重验
       const tgAuthStore = useTelegramAuthStore()

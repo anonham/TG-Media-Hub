@@ -2,6 +2,7 @@
 // 全部函数基于 openapi_snapshot.json 自动生成的强类型 SDK (./gen, 严禁手工编辑),
 // 严禁在本文件之外手写 URL 或直接 import axios —— 生成器重跑时这里随之收敛。
 import './client'
+import { useAuthStore } from '@/stores/authStore'
 import {
   listAccountsApiAccountsGet,
   createAccountApiAccountsPost,
@@ -497,7 +498,10 @@ export const authApi = {
     return getAuthStatusApiAuthStatusGet()
   },
   verify(key: string) {
-    return verifyAuthTokenApiAuthVerifyGet({ headers: { 'X-API-Key': key } })
+    return verifyAuthTokenApiAuthVerifyGet({
+      headers: { 'X-API-Key': key },
+      authVerificationGeneration: useAuthStore().getCredentialGeneration(),
+    })
   },
   issueMediaTicket() {
     return createMediaTicketApiAuthMediaTicketPost()

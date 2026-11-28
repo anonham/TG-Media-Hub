@@ -80,10 +80,10 @@ export const useAuthStore = defineStore('auth', () => {
         return true
       }
 
+      isAuthChecked.value = true
       if (apiKey.value) {
         const verifyOutcome = await verifyKey(apiKey.value)
         if (!tgAuthStore.isAdmissionReadCurrent(read) || credGen !== credentialGeneration) return false
-        isAuthChecked.value = true
         if (verifyOutcome === 'valid') {
           isKeyVerified.value = true
           isModalVisible.value = false
@@ -97,7 +97,6 @@ export const useAuthStore = defineStore('auth', () => {
         }
       } else {
         isKeyVerified.value = false
-        isAuthChecked.value = true
         openAuthModal('服务已开启身份验证，请输入 API Key 进入控制台')
         return false
       }
@@ -200,6 +199,10 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
+  function getCredentialGeneration(): number {
+    return credentialGeneration
+  }
+
   return {
     apiKey,
     isKeyVerified,
@@ -216,5 +219,6 @@ export const useAuthStore = defineStore('auth', () => {
     clearAuthKey,
     openAuthModal,
     handle401Error,
+    getCredentialGeneration,
   }
 })

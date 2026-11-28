@@ -14,6 +14,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any
@@ -160,7 +161,7 @@ async def _teardown_bound(coro: Any, limit: float) -> None:
 @pytest.fixture(scope="session")
 def ui_scratch_dir(ui_gate: None) -> Iterator[Path]:
     """scratch DATA_DIR: 克隆真实 data/ 至 tests/tmp/ 并预置种子文件与观测目录."""
-    stamp = time.strftime("%Y%m%d_%H%M%S")
+    stamp = uuid.uuid4().hex
     dest = _REPO_ROOT / "tests" / "tmp" / f"e2e_ui_{stamp}"
     scratch_env.clone_source_data(dest)
 

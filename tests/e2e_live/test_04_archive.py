@@ -151,8 +151,6 @@ async def test_structured_archive_dir_tree_and_source_prune(
     assert len(videos) == 1 and leaf_name in (videos[0].text or ""), (
         f"频道应新增 1 条 {leaf_name} 视频消息, 实得 {[(m.text or '')[:40] for m in msgs]}"
     )
-    for msg in msgs:
-        live_cleanup.register_message(target_chat, int(msg.id))
 
     # ---- 网盘只读断言: 归档层级重建 + 源目录清空 ----
     root_items = pikpak_probe.list_remote_page(live_api, "")

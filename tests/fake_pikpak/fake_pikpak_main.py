@@ -18,6 +18,7 @@ auth_then_network | token_refresh_failed
 (OAuth 设备码惯例预设), 真实样本到位后校准。
 """
 
+import hashlib
 import json
 import os
 import pathlib
@@ -48,7 +49,7 @@ def _safe_target(name: str) -> pathlib.Path:
 
 _ENTRY = {}
 
-_ENV_KEYS = ("PIKPAK_TOKEN", "PIKPAK_DIR", "PIKPAK_NO_LOG", "PIKPAK_NO_UPDATE_NOTIFIER")
+_ENV_KEYS = ("PIKPAK_DIR", "PIKPAK_NO_LOG", "PIKPAK_NO_UPDATE_NOTIFIER")
 
 
 def _journal_enter():
@@ -60,6 +61,8 @@ def _journal_enter():
         "args": sys.argv[1:],
         "env": {k: os.environ.get(k) for k in _ENV_KEYS if k in os.environ},
     }
+    if "PIKPAK_TOKEN" in os.environ:
+        _ENTRY["data"]["env"]["PIKPAK_TOKEN"] = hashlib.sha256(os.environ["PIKPAK_TOKEN"].encode()).hexdigest()
     _ENTRY["file"].write_text(json.dumps(_ENTRY["data"], ensure_ascii=False), encoding="utf-8")
 
 

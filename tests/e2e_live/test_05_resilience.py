@@ -59,6 +59,7 @@ def _poll(live_api: api_client.LiveApiClient, task_id: str, predicate, timeout: 
     raise AssertionError(f"任务 {task_id} 在 {timeout}s 内未满足轮询条件, 最后状态 {last.get('status')!r}")
 
 
+@pytest.mark.usefixtures("managed_live_server")
 async def test_server_kill_restart_and_resume(
     live_server, live_api, tg_reader, target_chat, live_cleanup, live_db, scratch_data_dir
 ) -> None:
@@ -185,6 +186,7 @@ def test_network_outage_resilience_manual_placeholder() -> None:
     )
 
 
+@pytest.mark.usefixtures("managed_live_server")
 def test_session_path_normalization_and_account_cleanup(live_api, live_db, scratch_data_dir) -> None:
     """E2E-LIVE-20 (承 E2E-MISC-01/02): 会话路径归一 + 账号删除四类文件全清。
 

@@ -1,79 +1,117 @@
-"""CleanupLedger 单元测试 (覆盖任务取消与反转删除、水位重扫合并去重、目录清理)."""
-
-from __future__ import annotations
+"""Offline safety checks for live and UI test cleanup."""
 
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
+import httpx
 import pytest
+from e2e_live.harness.cleanup import CleanupLedger
 
-from tests.e2e_live.harness.cleanup import CleanupLedger
-
-
-@pytest.mark.asyncio
-async def test_cleanup_ledger_reverse_order_and_watermark_rescan(tmp_path: Path) -> None:
-    ledger = CleanupLedger(keep_messages=False, keep_dirs=False)
-
-    test_dir = tmp_path / "scratch_test"
-    test_dir.mkdir()
-    (test_dir / "file.txt").write_text("data", encoding="utf-8")
-
-    ledger.register_dir(test_dir)
-    ledger.register_task("task_001")
-    ledger.register_task("task_002")
-    ledger.register_message("-100123", 101)
-    ledger.register_message("-100123", 102)
-    ledger.register_watermark("-100123", 100)
-
-    # 模拟 API 客户端
-    mock_api = MagicMock()
-    mock_api.post = MagicMock(return_value={"status": "ok"})
-    mock_api.delete = MagicMock(return_value={"status": "deleted"})
-
-    # 模拟 reader 客户端
-    mock_reader = MagicMock()
-    mock_reader.resolve_chat = AsyncMock(return_value="chat_entity_-100123")
-    # 水位 100 之后发现了 102 (重复), 103 (新)
-    mock_reader.collect_ids_after = AsyncMock(return_value=[102, 103])
-    mock_reader.delete_messages = AsyncMock()
-
-    await ledger.flush_async(api=mock_api, reader=mock_reader)
-
-    # 验证任务先取消后删除
-    assert mock_api.post.call_count == 2
-    mock_api.post.assert_any_call("/api/tasks/task_001/cancel")
-    mock_api.post.assert_any_call("/api/tasks/task_002/cancel")
-    assert mock_api.delete.call_count == 2
-    mock_api.delete.assert_any_call("/api/tasks/task_001")
-    mock_api.delete.assert_any_call("/api/tasks/task_002")
-
-    # 验证水位重扫
-    mock_reader.resolve_chat.assert_called_with("-100123")
-    mock_reader.collect_ids_after.assert_awaited_once_with("chat_entity_-100123", 100)
-
-    # 验证去重并删除 [101, 102, 103]
-    mock_reader.delete_messages.assert_awaited_once_with("chat_entity_-100123", [101, 102, 103])
-
-    # 验证目录清理
-    assert not test_dir.exists()
+from app.config import settings
+from app.db.database import db_cursor
 
 
-@pytest.mark.asyncio
-async def test_cleanup_ledger_keep_flags(tmp_path: Path) -> None:
+def response(status):
+    return httpx.Response(status, request=httpx.Request("DELETE", "http://test.invalid/task"))
+
+
+def seed_receipts():
+    with db_cursor(commit=True) as cursor:
+        cursor.executemany(
+            """INSERT INTO publish_history (task_id,target_chat_id,tg_message_id,file_path,file_size,published_at)
+               VALUES (?,?,?, ?,1,0)""",
+            [
+                ("ours", "chat", 101, "a"),
+                ("other", "chat", 102, "b"),
+                ("ours", "chat", 103, "c"),
+                ("ours", "elsewhere", 104, "d"),
+                ("ours", "chat", 99, "old"),
+            ],
+        )
+
+
+async def test_only_confirmed_messages_deleted(tmp_path):
+    seed_receipts()
+    ledger = CleanupLedger(db_path=Path(settings.DB_PATH))
+    ledger.register_dir(tmp_path / "owned")
+    (tmp_path / "owned").mkdir()
+    ledger.register_watermark("chat", 100)
+    ledger.register_task("ours")
+    ledger.register_message("chat", 101)
+    api = MagicMock()
+    api.post.return_value = response(409)
+    api.delete.return_value = response(200)
+    reader = AsyncMock()
+    reader.resolve_chat.return_value = "entity"
+    await ledger.flush_async(api, reader)
+    assert api.method_calls == [call.post("/api/tasks/ours/cancel"), call.delete("/api/tasks/ours")]
+    reader.delete_messages.assert_awaited_once_with("entity", [101, 103])
+    assert not (tmp_path / "owned").exists()
+
+
+async def test_keep_messages_retires_tasks_and_retries_failed_delete(caplog, tmp_path):
     ledger = CleanupLedger(keep_messages=True, keep_dirs=True)
+    kept = tmp_path / "kept"
+    kept.mkdir()
+    ledger.register_dir(kept)
+    ledger.register_task("ours")
+    ledger.register_message("chat", 101)
+    api = MagicMock()
+    api.post.return_value = response(200)
+    api.delete.side_effect = [response(500), response(404)]
+    reader = AsyncMock()
+    await ledger.flush_async(api, reader)
+    with pytest.raises(RuntimeError, match="ours"):
+        ledger.check_finished()
+    for _ in range(2):
+        await ledger.flush_async(api, reader)
+    ledger.check_finished()
+    assert kept.exists()
+    assert api.delete.call_count == 2
+    assert "ours" in caplog.text
+    reader.delete_messages.assert_not_awaited()
 
-    test_dir = tmp_path / "kept_dir"
-    test_dir.mkdir()
-    ledger.register_dir(test_dir)
-    ledger.register_message("-100999", 500)
-    ledger.register_watermark("-100999", 400)
 
-    mock_reader = MagicMock()
-    mock_reader.delete_messages = AsyncMock()
+async def test_ui_cleanup_uses_only_registered_task_receipts(monkeypatch):
+    from e2e_ui import test_ui_tasks as ui
 
-    await ledger.flush_async(reader=mock_reader)
+    seed_receipts()
+    state = {"registry": ["ours"], "target_chat": "chat", "taskA": "ours", "taskB": "", "mark": 100, "owned_ids": set()}
+    monkeypatch.setattr(ui, "_live_state", state)
+    monkeypatch.setattr(ui, "_http_request_sync", lambda *args: (200, {"status": "completed"}))
+    reader = AsyncMock()
+    reader.resolve_chat.return_value = "entity"
+    reader.delete_messages.side_effect = [RuntimeError("disconnected"), None]
+    with pytest.raises(RuntimeError, match="disconnected"):
+        await ui._cleanup_live_tasks(reader, "chat", Path(settings.DB_PATH))
+    assert not state["registry"] and state["owned_ids"] == {101, 103}
+    await ui._cleanup_live_tasks(reader, "chat", Path(settings.DB_PATH))
+    reader.delete_messages.assert_awaited_with("entity", [101, 103])
+    assert not state["owned_ids"]
 
-    # keep_messages 为 True 时不调用删除
-    mock_reader.delete_messages.assert_not_called()
-    # keep_dirs 为 True 时保留目录
-    assert test_dir.exists()
+
+def test_telethon_session_is_confined(tmp_dir):
+    from telethon import TelegramClient
+
+    with pytest.raises(ValueError, match="outside test sandbox"):
+        TelegramClient(str(Path(tmp_dir) / ".." / "unowned"), 1, "dummy")
+    from telethon.sessions import MemorySession
+
+    assert isinstance(TelegramClient(MemorySession(), 1, "dummy").session, MemorySession)
+
+
+def test_scratch_clone_rejects_existing_directory(tmp_path, monkeypatch):
+    from e2e_live.harness import scratch_env
+
+    src = tmp_path / "source"
+    src.mkdir()
+    monkeypatch.setenv("E2E_LIVE_SOURCE_DATA_DIR", str(src))
+    dest = tmp_path / "existing"
+    dest.mkdir()
+    sentinel = dest / "user.session"
+    sentinel.write_bytes(b"owned elsewhere")
+    with pytest.raises(FileExistsError):
+        scratch_env.clone_source_data(dest)
+    with pytest.raises(ValueError, match="scratch"):
+        scratch_env.clone_source_data(src / "nested")
+    assert sentinel.read_bytes() == b"owned elsewhere"

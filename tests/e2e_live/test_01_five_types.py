@@ -148,10 +148,17 @@ async def test_forward_channel_real_chain(channel_stage, live_api, tg_reader, li
     assert data["bad"] == 0, data
     assert data.get("dedup_skipped") in (0, None), data
 
-    new_ids = await tg_reader.collect_ids_after(target_entity, target_mark)
-    assert len(new_ids) == 1, f"转发目标频道应恰好新增 1 条消息, 实得 {new_ids}"
-    for msg_id in new_ids:
+    history = live_api.get(
+        "/api/forward/history",
+        params={"source_chat": chat_ref, "target_chat": forward_target, "source_msg_id": media_id},
+    )
+    history.raise_for_status()
+    owned = {int(row["target_msg_id"]) for row in history.json()["data"] if row["task_id"] == task_id}
+    assert len(owned) == 1 and min(owned) > target_mark, "缺少本轮转发任务的目标消息回执"
+    for msg_id in owned:
         live_cleanup.register_message(forward_target, msg_id)
+    new_ids = await tg_reader.collect_ids_after(target_entity, target_mark)
+    assert owned.issubset(new_ids), f"频道中未找到本轮已转发消息 {owned}"
 
 
 async def test_publish_folder_real_chain(tmp_path, live_api, tg_reader, target_chat, live_cleanup) -> None:
@@ -200,8 +207,6 @@ async def test_publish_folder_real_chain(tmp_path, live_api, tg_reader, target_c
     )
     newest = max(msgs, key=lambda m: m.id)
     assert (newest.text or "").strip(), "最后一条应为总结卡文本消息"
-    for msg in msgs:
-        live_cleanup.register_message(target_chat, int(msg.id))
 
 
 def _is_admission_rejected_fixture(item: dict) -> bool:
@@ -293,5 +298,3 @@ async def test_pikpak_publish_zero_disk(live_api, tg_reader, target_chat, live_c
 
     msgs = await tg_reader.collect_messages_after(chat, mark)
     assert len(msgs) >= len(picked), f"频道新增消息数应 ≥ 文件数: 实得 {len(msgs)}"
-    for msg in msgs:
-        live_cleanup.register_message(target_chat, int(msg.id))

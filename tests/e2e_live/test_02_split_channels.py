@@ -25,6 +25,7 @@ E2E_CAPTURE_MODE=true), 磁盘成本 ≈3× 源体积 (E1 源快照 + E2 分卷�
 import ctypes
 import ctypes.wintypes
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -353,11 +354,6 @@ async def _resolve_chat_or_skip(tg_reader: tg_reader_mod.TgReader, target_chat: 
         pytest.skip(f"无 userbot 会话可解析测试频道 {target_chat}: {exc}")
 
 
-def _register_messages(live_cleanup: Any, target_chat: str, msgs: list[Any]) -> None:
-    for msg in msgs:
-        live_cleanup.register_message(target_chat, int(msg.id))
-
-
 async def test_vsse_faststart_split_publish(
     split_stage, live_api, live_server, tg_reader, target_chat, live_cleanup, scratch_data_dir
 ) -> None:
@@ -397,7 +393,6 @@ async def test_vsse_faststart_split_publish(
     assert "⚡ [CIRCUIT BREAKER]" not in logs, "faststart 主样本不应触发熔断降级"
     msgs = await tg_reader.collect_messages_after(chat, mark)
     _assert_volume_messages(msgs, F1S, expect_video=True)
-    _register_messages(live_cleanup, target_chat, msgs)
 
 
 async def test_vsse_rear_moov_split_publish(
@@ -436,7 +431,6 @@ async def test_vsse_rear_moov_split_publish(
     assert "VSSE pre-flight 校验未通过" not in logs, "rear-moov 样本不应被 preflight 改道 fMP4"
     msgs = await tg_reader.collect_messages_after(chat, mark)
     _assert_volume_messages(msgs, F2S, expect_video=True)
-    _register_messages(live_cleanup, target_chat, msgs)
 
 
 async def test_vsse_hevc_whitelist_publish(
@@ -475,7 +469,6 @@ async def test_vsse_hevc_whitelist_publish(
     assert "安全降级至 raw" not in logs, "HEVC 不应触发 raw 物理分卷降级"
     msgs = await tg_reader.collect_messages_after(chat, mark)
     _assert_volume_messages(msgs, F6S, expect_video=True)
-    _register_messages(live_cleanup, target_chat, msgs)
 
 
 async def test_fmp4_mkv_ac3_publish(
@@ -516,7 +509,6 @@ async def test_fmp4_mkv_ac3_publish(
     assert "⚡ [CIRCUIT BREAKER]" not in logs, "fmp4_universal 直连路由不应出现 VSSE 熔断"
     msgs = await tg_reader.collect_messages_after(chat, mark)
     _assert_volume_messages(msgs, F3S, expect_video=True, exact_count=None)
-    _register_messages(live_cleanup, target_chat, msgs)
 
 
 async def test_raw_split_document_form(
@@ -555,7 +547,6 @@ async def test_raw_split_document_form(
     assert "⚡ [CIRCUIT BREAKER]" not in logs
     msgs = await tg_reader.collect_messages_after(chat, mark)
     _assert_volume_messages(msgs, F1S, expect_video=False)
-    _register_messages(live_cleanup, target_chat, msgs)
 
 
 async def test_ffmpeg_global_concurrency_cap(
@@ -605,8 +596,6 @@ async def test_ffmpeg_global_concurrency_cap(
         f"3 任务应有 ≥6 条 F3s 分卷消息 (容忍重规划), 实得 {len(volumes)}; "
         f"captions={[(m.text or '')[:40] for m in msgs]}"
     )
-    for m in msgs:
-        live_cleanup.register_message(target_chat, int(m.id))
 
 
 def _copy_session_bundle(src: Path, dst: Path) -> None:
@@ -658,7 +647,7 @@ async def test_capture_linkage_vsse_byte_fidelity(
     assert len(manifests) == 1, f"单文件任务应恰 1 个 item manifest, 实得 {manifests} (root={capture_root})"
     manifest = manifests[0]
 
-    # E3 回下载: 显式 --manifest/--session/--api-* (settings 路径族 BASE_DIR 派生不读 env,
+    # E3 回下载: 显式 --manifest/--session (settings 路径族 BASE_DIR 派生不读 env,
     # 子进程无法经环境重定向, 会话用 reader 副本束, 不触碰真实 data/)
     mirror_session = scratch_data_dir / "live_mirror.session"
     _copy_session_bundle(tg_reader.session_file, mirror_session)
@@ -672,11 +661,12 @@ async def test_capture_linkage_vsse_byte_fidelity(
             str(manifest),
             "--session",
             str(mirror_session),
-            "--api-id",
-            str(app_config.settings.API_ID),
-            "--api-hash",
-            str(app_config.settings.API_HASH),
         ],
+        env={
+            **os.environ,
+            "TG_API_ID": str(app_config.settings.API_ID),
+            "TG_API_HASH": app_config.settings.API_HASH or "",
+        },
         cwd=str(env_gate.REPO_ROOT),
         capture_output=True,
         text=True,
@@ -703,6 +693,3 @@ async def test_capture_linkage_vsse_byte_fidelity(
     assert any(n.startswith("A1") for n in passed), f"A1 字节全等无 PASS: {report.get('results')}"
     assert any(n.startswith("A2") for n in passed), f"A2 区间完备性无 PASS: {report.get('results')}"
     assert any(n.startswith("A4") for n in passed), f"A4 尺寸双保险无 PASS: {report.get('results')}"
-
-    msgs = await tg_reader.collect_messages_after(chat, mark)
-    _register_messages(live_cleanup, target_chat, msgs)

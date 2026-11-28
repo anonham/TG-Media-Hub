@@ -39,15 +39,21 @@ def clone_source_data(dest: Path) -> Path:
     src = env_gate.source_data_dir()
     if not src.is_dir():
         raise RuntimeError(f"克隆源不存在: {src} (E2E_LIVE_SOURCE_DATA_DIR 或仓库 data/)")
-    dest.mkdir(parents=True, exist_ok=True)
-    for item in src.iterdir():
-        if item.name in _EXCLUDED_TOP_LEVEL or item.name == _LOCK_FILE:
-            continue
-        target = dest / item.name
-        if item.is_dir():
-            shutil.copytree(item, target)
-        else:
-            shutil.copy2(item, target)
+    if dest.resolve().is_relative_to(src.resolve()):
+        raise ValueError("scratch 目录不能位于克隆源内")
+    dest.mkdir(parents=True, exist_ok=False)
+    try:
+        for item in src.iterdir():
+            if item.name in _EXCLUDED_TOP_LEVEL or item.name == _LOCK_FILE:
+                continue
+            target = dest / item.name
+            if item.is_dir():
+                shutil.copytree(item, target)
+            else:
+                shutil.copy2(item, target)
+    except BaseException:
+        shutil.rmtree(dest)
+        raise
     return dest
 
 

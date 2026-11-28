@@ -225,8 +225,6 @@ async def test_video_cover_on_send_path(thumb_samples, live_api, tg_reader, targ
         (_norm_key(clip), clip.stat().st_size),
     )
     assert hist is not None and int(hist["tg_message_id"] or 0) > 0, "发布成功应入 publish_history"
-    for msg in msgs:
-        live_cleanup.register_message(target_chat, int(msg.id))
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="LIVE-25 故障注入依赖 Windows msvcrt 字节锁，非 Windows 跳过")
@@ -265,8 +263,6 @@ async def test_black_source_cover_fallback_send_and_backfill(
         (_norm_key(black_a), black_a.stat().st_size),
     )
     assert hist_a is not None and int(hist_a["tg_message_id"] or 0) > 0
-    for msg in msgs:
-        live_cleanup.register_message(target_chat, int(msg.id))
 
     # ---- Phase B: 回填 edit 路径 (失败档用 7.5MB 中档样本 + 整文件字节锁注入:
     #      确定性故障, 与上传速度/时序无关; 解锁后文件完好, 重试直接回填) ----
@@ -287,8 +283,6 @@ async def test_black_source_cover_fallback_send_and_backfill(
         f"应恰 1 张 ⏳ Photo 失败卡: {[(m.text or '')[:40] for m in msgs_b]}"
     )
     card_id = int(cards[0].id)
-    for msg in msgs_b:
-        live_cleanup.register_message(target_chat, int(msg.id))
 
     retry = live_api.post(f"/api/tasks/{task_id_b}/retry")
     assert retry.status_code == 200, retry.text
@@ -390,8 +384,6 @@ async def test_local_admission_invalid_ts_filtered_and_ts_m4v_published(
                 (_norm_key(path), path.stat().st_size),
             )
             assert row is not None and int(row["tg_message_id"] or 0) > 0, f"{path.name} 应入 publish_history"
-        for msg in msgs:
-            live_cleanup.register_message(target_chat, int(msg.id))
 
 
 def _pick_remote_ts_candidates(
@@ -509,5 +501,3 @@ async def test_pikpak_remote_ts_admission_gate(
         f"应恰 1 条真 .ts 消息, 实得 {[(m.text or '')[:40] for m in msgs]}; logs={logs[-600:]}"
     )
     assert not photos, f"无效 .ts 被拒严禁发包位卡: {[(m.text or '')[:40] for m in photos]}"
-    for msg in msgs:
-        live_cleanup.register_message(target_chat, int(msg.id))

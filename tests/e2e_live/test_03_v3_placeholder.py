@@ -235,8 +235,6 @@ async def test_placeholder_card_lifecycle_and_inplace_backfill(
     assert hist2 is not None and int(hist2["tg_message_id"] or 0) == int(card.id), (
         "回填成功后 publish_history 应补记且 tg_message_id = 原卡消息 ID"
     )
-    for msg in [*msgs1, *msgs2]:
-        live_cleanup.register_message(target_chat, int(msg.id))
 
 
 async def test_album_group_summary_vs_per_item_cards(
@@ -329,9 +327,6 @@ async def test_album_group_summary_vs_per_item_cards(
     skipped_names = {s.get("file_name") for s in (params.get("skipped_files") or [])}
     assert "v3_big.mkv" in skipped_names, f"超限明细应含 v3_big.mkv: {skipped_names}"
 
-    for msg in msgs:
-        live_cleanup.register_message(target_chat, int(msg.id))
-
 
 async def test_failure_card_cap_ten_plus_one(
     v3_samples, live_api, tg_reader, target_chat, live_cleanup, live_db
@@ -384,5 +379,3 @@ async def test_failure_card_cap_ten_plus_one(
     )
     assert len(rows) == 10, f"backfillable 槽应恰 10 (第 11+ 项失败无卡无槽), 实得 {len(rows)}"
     assert all(r["state"] == "placeholder_sent" for r in rows), "fail_count=1 < 1+max_retries, 不应被 finalize 终态化"
-    for msg in msgs:
-        live_cleanup.register_message(target_chat, int(msg.id))

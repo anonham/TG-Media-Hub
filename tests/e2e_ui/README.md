@@ -59,3 +59,5 @@ E2E_UI=1 E2E_UI_BASE_URL=http://127.0.0.1:5173 E2E_UI_TARGET_CHAT=-100xxxxxxxxxx
 - `failure.png`: 失败发生时的全屏渲染截图。
 - `trace.zip`: Playwright 完整的执行轨迹追踪包（可通过 `uv run python -m playwright show-trace trace.zip` 可视化复盘）。
 - 该临时目录受 `.gitignore` 保护，并在每次执行 pytest 前被自动化夹具清扫，零污染 Git 工作区。
+
+实网发布测试按本轮任务和目标频道的数据库回执清理消息。连接外部后端时仅清理本轮任务；无归属回执的频道消息会保留。

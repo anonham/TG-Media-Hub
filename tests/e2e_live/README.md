@@ -17,7 +17,7 @@
    uv run pytest tests/e2e_live/test_00_preflight.py -q
    ```
 
-3. 结束后默认自动清理：scratch 目录（`tests/.tmp/e2e_live_*`）、本次发送的频道消息
+3. 结束后默认自动清理：scratch 目录（`tests/.tmp/e2e_live_*`）、有本轮发送结果或任务回执的频道消息
    （清理账本回收）、本次任务行（经 `DELETE /api/tasks/{task_id}`）。
 4. 重启真实服务。
 
@@ -26,14 +26,14 @@
 | 变量 | 语义 | 缺省 |
 |---|---|---|
 | `E2E_LIVE` | 总开关，未设置整包收集即 skip | 未设 |
-| `E2E_LIVE_BASE_URL` | 外部已起服务器地址（attach 形态，harness 不管理其生命周期） | 未设 = harness 自起 |
-| `E2E_LIVE_DATA_DIR` | scratch 根目录 | `tests/.tmp/e2e_live_<时间戳>` |
+| `E2E_LIVE_BASE_URL` | 外部已起服务器地址（attach 模式会跳过依赖服务数据库的用例，包括重启和删除账号） | 未设 = harness 自起 |
+| `E2E_LIVE_DATA_DIR` | 本轮独占的新目录，路径须尚不存在且位于克隆源之外 | `tests/.tmp/e2e_live_<UUID>` |
 | `E2E_LIVE_SOURCE_DATA_DIR` | 克隆源 | 仓库 `data/` |
 | `E2E_LIVE_TARGET_CHAT` | 测试频道 | 回退 `.env` 的 `TEST_CHANNEL_LINK` |
 | `E2E_LIVE_FORWARD_TARGET` | E2E-LIVE-04 专用转发目标频道（禁止回退共享 `TRANSIT_CHAT_ID`） | 未设（缺省即 skip） |
 | `E2E_LIVE_SAMPLE_DIR` | 样本根目录 | 回退 `.env` 的 `TEST_SAMPLE_FOLDER` |
 | `E2E_LIVE_KEEP_SCRATCH` | 保留 scratch（改放项目持久缓存目录 `tests/tmp/e2e_live_*` 以幸存） | 未设 |
-| `E2E_LIVE_KEEP_MSGS` | 保留已发频道消息（裁决：默认 teardown 逐条删除） | 未设 |
+| `E2E_LIVE_KEEP_MSGS` | 保留频道消息；本轮任务照常清理 | 未设 |
 | `E2E_LIVE_MAX_FILE_SIZE_MB` | 切片族低阈值注入·标准门限（§9.0 裁决） | 64 |
 | `E2E_LIVE_PREMIUM_MAX_FILE_SIZE_MB` | 切片族低阈值注入·Premium 门限（§9.0 裁决） | 128 |
 | `E2E_LIVE_PIKPAK_REMOTE_DIR` | PikPak 远端测试目录路径（切片族 E2E-LIVE-06~17 前置，未设逐项 skip） | 未设 |

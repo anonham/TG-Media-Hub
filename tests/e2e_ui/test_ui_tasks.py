@@ -15,7 +15,6 @@ import asyncio
 import json
 import re
 import shutil
-import sys
 import time
 import urllib.error
 import urllib.request
@@ -24,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from e2e_live.harness.cleanup import published_message_ids
 from playwright.async_api import Page, expect
 
 from .conftest import _reader_creds, _userbot_session_candidates
@@ -48,6 +48,7 @@ _live_state: dict[str, Any] = {
     "mark": None,
     "target_chat": "",
     "registry": [],
+    "owned_ids": set(),
 }
 
 
@@ -115,12 +116,13 @@ async def _init_live_tasks(
 async def _cleanup_live_tasks(
     tg_reader: Any,
     ui_target_chat: str,
+    db_path: Path | None,
 ) -> None:
-    """清理闭环: 任务取消先行 → 轮询终态 → 删任务行确认执行器退出 → 水位增量抓取删频道消息 (失败显式报错并保留未清理状态).
+    """清理闭环: 任务取消先行 → 轮询终态 → 删任务行确认执行器退出 → 删除有任务回执的频道消息 (失败显式报错并保留未清理状态).
 
     HTTP 走 _http_request_sync (传输无关): 最后一个用例结束后 playwright RPC 通道可能已失效,
     同步 HTTP 不依赖浏览器传输, 保证清理必然可达后端.
-    先删任务行作为执行器退出同步点 (delete_task 守卫要求 not is_task_running), 再收集水位消息,
+    先删任务行作为执行器退出同步点 (delete_task 守卫要求 not is_task_running), 再删除已登记的回执消息,
     避免 cancel 后在途晚到消息漏删.
     """
     task_ids = list(dict.fromkeys(_live_state["registry"]))
@@ -181,6 +183,9 @@ async def _cleanup_live_tasks(
     remaining_ids: list[str] = []
     for tid in task_ids:
         try:
+            if db_path is not None and mark is not None:
+                ids = published_message_ids(db_path, tid, ui_target_chat, mark)
+                _live_state["owned_ids"].update(ids)
             ok, del_err = await _delete_task_row_async(tid)
             if ok:
                 if _live_state.get("taskA") == tid:
@@ -196,28 +201,17 @@ async def _cleanup_live_tasks(
 
     _live_state["registry"][:] = remaining_ids
 
-    # 4. 水位区间全量消息捕获 (Watermark Delta Tracking) 并删除
-    # 已知降级路径: 复用夹具 reader 在收尾阶段可能触发 Telethon "event loop must not
-    # change" (连接 loop 与收尾运行 loop 不一致) — 此时不计入错误并保持 mark 未复位,
-    # live_session_cleanup 会话级兜底将以全新 reader 重试删除 (其失败仍会响亮报错)。
-    # 仅当 remaining_ids 为空 (所有执行器已确认退出) 时才复位 mark, 避免漏掉在途晚到消息。
-    chat_ref = ui_target_chat or str(_live_state.get("target_chat") or "")
-    if mark is not None and chat_ref:
-        try:
-            chat_entity = await tg_reader.resolve_chat(chat_ref)
-            new_ids = await tg_reader.collect_ids_after(chat_entity, int(mark))
-            if new_ids:
-                await tg_reader.delete_messages(chat_entity, new_ids)
-            if not remaining_ids:
-                _live_state["mark"] = None
-        except Exception as exc:
-            print(
-                f"[live-cleanup] 频道消息删除降级至会话级兜底重试 (chat={chat_ref}, mark={mark}): {exc}",
-                file=sys.stderr,
-            )
-
-    if not remaining_ids and _live_state["mark"] is None:
+    # 保留失败的 ID，供会话级清理重试。外部服务没有对应的 scratch 回执。
+    owned = _live_state["owned_ids"]
+    if owned and tg_reader is not None:
+        chat_entity = await tg_reader.resolve_chat(ui_target_chat)
+        await tg_reader.delete_messages(chat_entity, sorted(owned))
+        owned.clear()
+    if owned:
+        cleanup_errors.append(f"缺少 reader，待清理的本轮消息: {sorted(owned)}")
+    if not remaining_ids and not owned:
         _live_state["target_chat"] = ""
+        _live_state["mark"] = None
 
     if cleanup_errors:
         raise RuntimeError("实网任务/频道消息清理未完全成功: " + "; ".join(cleanup_errors))
@@ -249,112 +243,26 @@ async def _delete_task_row_async(tid: str) -> tuple[bool, str]:
     return False, f"HTTP {code}"
 
 
-async def _fallback_cleanup_async(ui_scratch_dir: Path) -> None:
-    """当最后一个 live 用例在 setup 阶段因依赖夹具失败/跳过而未进入 live_lifecycle 时的独立兜底清理."""
+async def _fallback_cleanup_async(ui_scratch_dir: Path, db_path: Path | None) -> None:
     from e2e_live.harness import tg_reader as tg_reader_mod
 
-    task_ids = list(dict.fromkeys(_live_state["registry"]))
-    mark = _live_state.get("mark")
-    chat_ref = str(_live_state.get("target_chat") or "")
-    if not task_ids and mark is None:
-        return
-
-    cleanup_errors: list[str] = []
-    terminal_states = {"cancelled", "completed", "failed"}
-
-    # 1. 取消残留任务
-    for tid in task_ids:
+    chat_ref = _live_state["target_chat"]
+    reader = None
+    session_copy = ui_scratch_dir / "ui_fallback_cleanup.session"
+    try:
+        if db_path is not None:
+            candidates = _userbot_session_candidates(ui_scratch_dir)
+            creds = _reader_creds()
+            if candidates and creds is not None:
+                shutil.copy2(candidates[0], session_copy)
+                reader = tg_reader_mod.TgReader(session_copy, *creds)
+    finally:
         try:
-            code, _ = await asyncio.to_thread(_http_request_sync, "POST", f"/api/tasks/{tid}/cancel")
-            # 409 = 任务已终态 (与主清理路径同口径: 幂等无害)
-            if code >= 400 and code not in (404, 409):
-                cleanup_errors.append(f"兜底取消任务 {tid} 失败 (HTTP {code})")
-        except Exception as exc:
-            cleanup_errors.append(f"兜底取消任务 {tid} 异常: {exc}")
-
-    # 2. 轮询等待终态
-    pending_ids: set[str] = set(task_ids)
-    last_query_errors: dict[str, str] = {}
-    for _ in range(30):
-        if not pending_ids:
-            break
-        still_pending: set[str] = set()
-        for tid in pending_ids:
-            try:
-                code, data = await asyncio.to_thread(_http_request_sync, "GET", f"/api/tasks/{tid}")
-                if code == 404:
-                    last_query_errors.pop(tid, None)
-                    continue
-                if code >= 400:
-                    last_query_errors[tid] = f"HTTP {code}"
-                    still_pending.add(tid)
-                    continue
-                status = str(data.get("status"))
-                if status not in terminal_states:
-                    last_query_errors[tid] = f"status={status}"
-                    still_pending.add(tid)
-                else:
-                    last_query_errors.pop(tid, None)
-            except Exception as exc:
-                last_query_errors[tid] = str(exc)
-                still_pending.add(tid)
-        pending_ids = still_pending
-        if not pending_ids:
-            break
-        await asyncio.sleep(1.0)
-
-    if pending_ids:
-        detail = ", ".join(f"{tid} ({last_query_errors.get(tid, 'unknown')})" for tid in sorted(pending_ids))
-        cleanup_errors.append(f"兜底等待任务终态超时 (30s): {detail}")
-
-    # 3. 物理删除任务行 (同步点: 确保执行器已退出调度器运行集合)
-    remaining_ids: list[str] = []
-    for tid in task_ids:
-        try:
-            ok, del_err = await _delete_task_row_async(tid)
-            if ok:
-                if _live_state.get("taskA") == tid:
-                    _live_state["taskA"] = ""
-                if _live_state.get("taskB") == tid:
-                    _live_state["taskB"] = ""
-            else:
-                remaining_ids.append(tid)
-                cleanup_errors.append(f"兜底删除任务行 {tid} 失败 ({del_err})")
-        except Exception as exc:
-            remaining_ids.append(tid)
-            cleanup_errors.append(f"兜底删除任务行 {tid} 异常: {exc}")
-
-    _live_state["registry"][:] = remaining_ids
-
-    # 4. 独立拉起临时 TgReader 清理频道增量消息 (仅当所有执行器均已退出后才复位 mark)
-    if mark is not None and chat_ref:
-        candidates = _userbot_session_candidates(ui_scratch_dir)
-        creds = _reader_creds()
-        if not candidates or creds is None:
-            cleanup_errors.append("兜底清理频道消息失败: 缺少可用 session 或 TG_API_ID/TG_API_HASH")
-        else:
-            session_copy = ui_scratch_dir / f"ui_fallback_cleanup_{int(time.time() * 1000)}.session"
-            shutil.copy2(candidates[0], session_copy)
-            reader = tg_reader_mod.TgReader(session_copy, *creds)
-            try:
-                await reader.connect()
-                chat_entity = await reader.resolve_chat(chat_ref)
-                new_ids = await reader.collect_ids_after(chat_entity, int(mark))
-                if new_ids:
-                    await reader.delete_messages(chat_entity, new_ids)
-                if not remaining_ids:
-                    _live_state["mark"] = None
-            except Exception as exc:
-                cleanup_errors.append(f"兜底清理频道消息失败 (chat={chat_ref}, mark={mark}): {exc}")
-            finally:
+            await _cleanup_live_tasks(reader, chat_ref, db_path)
+        finally:
+            if reader is not None:
                 await reader.aclose()
                 session_copy.unlink(missing_ok=True)
-
-    if not remaining_ids and _live_state["mark"] is None:
-        _live_state["target_chat"] = ""
-
-    if cleanup_errors:
-        raise RuntimeError("会话级兜底实网清理失败: " + "; ".join(cleanup_errors))
 
 
 def _is_last_live_test(request: pytest.FixtureRequest) -> bool:
@@ -376,31 +284,33 @@ def _is_last_live_test(request: pytest.FixtureRequest) -> bool:
 def live_session_cleanup(
     ui_backend_server: Any,
     ui_scratch_dir: Path,
-) -> Iterator[None]:
+) -> Iterator[Path | None]:
     """会话级兜底清理夹具: 即使最后一个 live 用例在 page/tg_reader setup 阶段失败或跳过，也保证已投任务被回收."""
+    data_dir = ui_backend_server.data_dir
+    db_path = data_dir / "tg_service.db" if data_dir is not None else None
     try:
-        yield
+        yield db_path
     finally:
         if _live_state["registry"] or _live_state["mark"] is not None:
-            asyncio.run(_fallback_cleanup_async(ui_scratch_dir))
+            asyncio.run(_fallback_cleanup_async(ui_scratch_dir, db_path))
 
 
 @pytest.fixture
 async def live_lifecycle(
-    live_session_cleanup: None,
+    live_session_cleanup: Path | None,
     request: pytest.FixtureRequest,
     page: Page,
     tg_reader: Any,
     ui_target_chat: str,
 ) -> AsyncIterator[None]:
-    """为单个或组合运行的 live 测试提供兜底清理，确保无论如何运行均无频道消息泄漏."""
+    """为单个或组合运行的 live 测试提供兜底清理，只清理有本轮归属回执的频道消息."""
     try:
         yield
     finally:
         if _is_last_live_test(request):
             # 收尾硬化: page.request RPC 在传输异常时可能永久挂起且取消不可达 —
             # asyncio.wait 限时, 超时放弃等待并响亮失败
-            task = asyncio.create_task(_cleanup_live_tasks(tg_reader, ui_target_chat))
+            task = asyncio.create_task(_cleanup_live_tasks(tg_reader, ui_target_chat, live_session_cleanup))
             done, pending = await asyncio.wait({task}, timeout=180.0)
             if pending:
                 pending.pop().cancel()

@@ -22,12 +22,13 @@ _PACKAGE_DIR = Path(__file__).resolve().parent
 
 def pytest_collection_modifyitems(config, items):
     """门控: E2E_LIVE 未设置 → 本目录全部用例收集即 skip; xdist worker 内一律 skip。"""
-    if env_gate.is_enabled() and not os.environ.get("PYTEST_XDIST_WORKER"):
-        return
     skip_mark = pytest.mark.skip(reason="E2E live 需要 E2E_LIVE=1 且禁用 xdist; 触发流程见 tests/e2e_live/README.md")
     for item in items:
         if Path(str(item.fspath)).is_relative_to(_PACKAGE_DIR):
-            item.add_marker(skip_mark)
+            if not env_gate.is_enabled() or os.environ.get("PYTEST_XDIST_WORKER"):
+                item.add_marker(skip_mark)
+            elif env_gate.base_url() and "managed_live_server" in item.fixturenames:
+                item.add_marker(pytest.mark.skip(reason="此用例需要测试自己启动的服务器和匹配的 scratch 数据库"))
 
 
 @pytest.fixture(scope="session")
@@ -83,9 +84,16 @@ def live_api(live_server) -> Iterator[api_client.LiveApiClient]:
 
 
 @pytest.fixture(scope="session")
-def live_db(scratch_data_dir) -> Iterator[sqlite3.Connection]:
-    """scratch 库只读连接 (F8: 仅 SELECT/PRAGMA, 写操作一律走应用 API)。"""
-    conn = db_readonly.connect_ro(scratch_data_dir / "tg_service.db")
+def managed_live_server(live_server) -> server_proc.LiveServer:
+    if not isinstance(live_server, server_proc.LiveServer):
+        pytest.skip("此用例仅适用于本轮测试启动的服务器")
+    return live_server
+
+
+@pytest.fixture(scope="session")
+def live_db(managed_live_server) -> Iterator[sqlite3.Connection]:
+    """仅打开本轮服务实际使用的 scratch 数据库。"""
+    conn = db_readonly.connect_ro(managed_live_server.data_dir / "tg_service.db")
     yield conn
     conn.close()
 
@@ -168,28 +176,30 @@ async def tg_reader(live_gate, scratch_data_dir):
 
 
 @pytest.fixture(scope="session")
-def live_cleanup(live_gate, live_api, scratch_data_dir, target_chat) -> Iterator[cleanup.CleanupLedger]:
+def live_cleanup(live_gate, live_api, live_server, scratch_data_dir, target_chat) -> Iterator[cleanup.CleanupLedger]:
     """会话级清理账本: setup 消息与各用例产物统一登记, 会话结束时一次性回收
     (消息 → 任务, §3.2 清理口径; scratch 目录由 scratch_data_dir 夹具负责)。"""
-    ledger = cleanup.CleanupLedger(keep_messages=env_gate.keep_messages(), keep_dirs=env_gate.keep_scratch())
+    db_path = live_server.data_dir / "tg_service.db" if isinstance(live_server, server_proc.LiveServer) else None
+    ledger = cleanup.CleanupLedger(env_gate.keep_messages(), env_gate.keep_scratch(), db_path)
     yield ledger
-    if env_gate.keep_messages():
-        ledger.flush_sync()
-        return
-    session_src = _reader_session_source(scratch_data_dir)
-    creds = _reader_creds()
-    if session_src is None or creds is None:
-        ledger.flush_sync()
-        return
-    session_copy = scratch_data_dir / "live_cleanup.session"
-    shutil.copy2(session_src, session_copy)
-    reader = tg_reader_mod.TgReader(session_copy, *creds)
 
     async def _flush() -> None:
+        reader = None
         try:
-            await ledger.flush_async(api=live_api, reader=reader)
+            if not env_gate.keep_messages():
+                session_src = _reader_session_source(scratch_data_dir)
+                creds = _reader_creds()
+                if session_src is not None and creds is not None:
+                    session_copy = scratch_data_dir / "live_cleanup.session"
+                    shutil.copy2(session_src, session_copy)
+                    reader = tg_reader_mod.TgReader(session_copy, *creds)
         finally:
-            await reader.aclose()
+            try:
+                await ledger.flush_async(api=live_api, reader=reader)
+                ledger.check_finished()
+            finally:
+                if reader is not None:
+                    await reader.aclose()
 
     asyncio.run(_flush())
 
@@ -217,8 +227,11 @@ def channel_stage(live_gate, scratch_data_dir, target_chat, live_cleanup) -> dic
             await reader.connect()
             chat = await reader.resolve_chat(target_chat)
             media1 = await reader.send_media(chat, stage_dir / "e2e_live_sample_a.jpg")
+            live_cleanup.register_message(target_chat, int(media1.id))
             media2 = await reader.send_media(chat, stage_dir / "e2e_live_sample_b.jpg")
+            live_cleanup.register_message(target_chat, int(media2.id))
             note = await reader.send_text(chat, "E2E-LIVE 非媒体消息 (range 跳过计数锚点)")
+            live_cleanup.register_message(target_chat, int(note.id))
             return {
                 "chat_ref": target_chat,
                 "media1_id": int(media1.id),
@@ -263,6 +276,4 @@ def channel_stage(live_gate, scratch_data_dir, target_chat, live_cleanup) -> dic
         )
     # 解析成功即完成实体缓存预热: 留存 warmed 会话供后续 reader/cleanup 副本免重扫
     shutil.copy2(chosen_copy, scratch_data_dir / _WARM_SESSION_NAME)
-    for msg_id in (stage["media1_id"], stage["media2_id"], stage["text_id"]):
-        live_cleanup.register_message(target_chat, msg_id)
     return stage

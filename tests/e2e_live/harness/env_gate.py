@@ -7,7 +7,7 @@ TEST_CHANNEL_LINK / TEST_SAMPLE_FOLDER / PORT 由本模块直接解析复用, �
 
 import ipaddress
 import os
-import time
+import uuid
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -61,12 +61,11 @@ def source_data_dir() -> Path:
 
 
 def resolve_scratch_dir() -> Path:
-    """scratch 根目录 (F7: 默认 tests/.tmp 下跑后清理; KEEP 开启时改放项目持久缓存目录
-    tests/tmp/ 以幸存——tests/.tmp 会被下一个 pytest 会话的 sessionstart 兜底清仓)。"""
+    """为每次运行分配独立的 scratch 目录。"""
     override = os.environ.get("E2E_LIVE_DATA_DIR", "").strip()
     if override:
         return Path(override)
-    stamp = time.strftime("%Y%m%d_%H%M%S")
+    stamp = uuid.uuid4().hex
     if keep_scratch():
         return REPO_ROOT / "tests" / "tmp" / f"e2e_live_{stamp}"
     return REPO_ROOT / "tests" / ".tmp" / f"e2e_live_{stamp}"

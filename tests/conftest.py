@@ -4,6 +4,7 @@ import os
 import shutil
 import sys
 import uuid
+from pathlib import Path
 
 import pytest
 from PIL import Image
@@ -43,7 +44,8 @@ PublishContext.__init__ = _patched_publish_context_init
 # 否则首个测试模块导入即触发 app/main.py 的 configure_logging(), dictConfig 单次 guard 下
 # RotatingFileHandler 会向真实 data/logs/app.log 落盘。落点沿用 tmp_dir 同款 os.makedirs 模式
 # (继承父目录 ACL, 避免 tempfile.mkdtemp 在 Windows 沙箱下的严格 ACL 问题)。
-_TEST_LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".tmp", f"logs_{uuid.uuid4().hex[:12]}")
+_RUN_DIR = Path(_TESTS_DIR) / ".tmp" / f"run_{uuid.uuid4().hex}"
+_TEST_LOG_DIR = str(_RUN_DIR / "logs")
 os.makedirs(_TEST_LOG_DIR, exist_ok=True)
 settings.LOG_DIR = _TEST_LOG_DIR
 
@@ -62,51 +64,13 @@ def pytest_configure(config: pytest.Config) -> None:
         config.addinivalue_line("filterwarnings", "ignore::starlette.exceptions.StarletteDeprecationWarning")
 
 
-def pytest_sessionstart(session):
-    """测试会话启动前钩子: 旧进程句柄已完全释放，自动安全清理历史孤儿 tests/.tmp 目录 (跳过当前会话日志目录)"""
-    if hasattr(session.config, "workerinput"):
-        return  # xdist worker 节点跳过历史目录清理，仅由 controller 进程在分发用例前执行一次
-    base = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".tmp")
-    if os.path.exists(base):
-        current_log_dir_name = os.path.basename(_TEST_LOG_DIR)
-        for item in os.listdir(base):
-            if item == current_log_dir_name:
-                continue
-            p = os.path.join(base, item)
-            try:
-                if os.path.isdir(p):
-                    shutil.rmtree(p, ignore_errors=True)
-                else:
-                    os.remove(p)
-            except Exception:
-                pass
-
-
 def pytest_sessionfinish(session, exitstatus):
     """套件结束: 先停日志监听线程 (flush 残余队列) 并 shutdown 全部 handler (释放 app.log 句柄) 再清理会话日志目录"""
     from app.core.log_setup import shutdown_logging
 
     shutdown_logging()
     logging.shutdown()
-    shutil.rmtree(_TEST_LOG_DIR, ignore_errors=True)
-
-    if hasattr(session.config, "workerinput"):
-        return  # xdist worker 节点跳过全仓根目录残留清理，由 controller 在全套件结束时执行一次
-
-    # 兜底清理根目录可能遗留的任何测试孤儿文件 (*.session 全量 glob — 根目录会话文件必然是
-    # 测试残留, 不再依赖前缀枚举; 生产会话在 data/ 等子目录不受影响)
-    base_dir = getattr(settings, "BASE_DIR", os.path.abspath("."))
-    if os.path.exists(base_dir):
-        for item in os.listdir(base_dir):
-            if item.endswith((".session", ".session-journal", ".session-wal", ".session-shm")) or item in (
-                "app.db",
-                "tg_media.db",
-                "tg_media_hub.db",
-            ):
-                try:
-                    os.remove(os.path.join(base_dir, item))
-                except Exception:
-                    pass
+    shutil.rmtree(_RUN_DIR, ignore_errors=True)
 
 
 @pytest.fixture
@@ -130,9 +94,7 @@ def tmp_dir():
     import gc
     import time
 
-    base = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".tmp")
-    os.makedirs(base, exist_ok=True)
-    path = os.path.join(base, f"test_{uuid.uuid4().hex[:12]}")
+    path = os.path.join(_RUN_DIR, f"test_{uuid.uuid4().hex[:12]}")
     os.makedirs(path)
     yield path
     gc.collect()
@@ -166,47 +128,30 @@ def setup_test_db(request, tmp_dir, monkeypatch):
     task_scheduler._is_running = False
     task_scheduler.startup_degraded = False
 
-    orig_data_dir = settings.DATA_DIR
-    orig_dl_dir = settings.DOWNLOAD_DIR
-    orig_meta_dir = settings.PIKPAK_META_DIR
-    orig_lock_path = settings.LOCK_PATH
-    orig_split_strategy = getattr(settings, "SPLIT_STRATEGY", "vsse_with_fallback")
-    orig_capture_mode = getattr(settings, "E2E_CAPTURE_MODE", False)
-    orig_capture_dir = getattr(settings, "E2E_CAPTURE_DIR", None)
     # 进程内测试沙箱钉回环绑定 (本机免认证的部署前提) —— 隔离开发者 .env 的 HOST=0.0.0.0,
     # 否则统一来源判定会把 TestClient 一律判为公网入口。非回环拓扑用例自行 monkeypatch 覆盖。
     monkeypatch.setattr(settings, "HOST", "127.0.0.1")
     monkeypatch.setattr(settings, "CONSOLE_REQUIRE_API_KEY", False)
-    settings.DATA_DIR = os.path.join(tmp_dir, "data")
-    settings.DOWNLOAD_DIR = os.path.join(tmp_dir, "downloads")
-    settings.PIKPAK_META_DIR = os.path.join(tmp_dir, "upload_meta")
-    settings.LOCK_PATH = os.path.join(tmp_dir, "tg_service.lock")
-    settings.SPLIT_STRATEGY = os.getenv("TEST_SPLIT_STRATEGY", "raw")
+    monkeypatch.setattr(settings, "DATA_DIR", os.path.join(tmp_dir, "data"))
+    monkeypatch.setattr(settings, "DOWNLOAD_DIR", os.path.join(tmp_dir, "downloads"))
+    monkeypatch.setattr(settings, "PIKPAK_META_DIR", os.path.join(tmp_dir, "upload_meta"))
+    monkeypatch.setattr(settings, "LOCK_PATH", os.path.join(tmp_dir, "tg_service.lock"))
+    monkeypatch.setattr(settings, "SPLIT_STRATEGY", os.getenv("TEST_SPLIT_STRATEGY", "raw"))
     # E2E 捕获模式: 默认关 (回归保障), 捕获目录沙箱化 (即便误开也不污染真实 data/)
-    settings.E2E_CAPTURE_MODE = False
-    settings.E2E_CAPTURE_DIR = os.path.join(tmp_dir, "e2e_capture")
+    monkeypatch.setattr(settings, "E2E_CAPTURE_MODE", False)
+    monkeypatch.setattr(settings, "E2E_CAPTURE_DIR", os.path.join(tmp_dir, "e2e_capture"))
     os.makedirs(settings.DATA_DIR, exist_ok=True)
     os.makedirs(settings.DOWNLOAD_DIR, exist_ok=True)
     os.makedirs(settings.PIKPAK_META_DIR, exist_ok=True)
     os.makedirs(settings.E2E_CAPTURE_DIR, exist_ok=True)
 
     test_db_path = os.path.join(tmp_dir, "test_tg_service.db")
-    settings.DB_PATH = test_db_path
+    monkeypatch.setattr(settings, "DB_PATH", test_db_path)
 
     # E2E 测试自行编排 scratch 环境或真实后台服务，跳过进程内冗余 DB 初始化与账号灌入
     if request.node.get_closest_marker("e2e_ui") or request.node.get_closest_marker("e2e_live"):
         yield test_db_path
         FailureLogger.close_all()
-        settings.DB_PATH = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "tg_service.db"
-        )
-        settings.DATA_DIR = orig_data_dir
-        settings.DOWNLOAD_DIR = orig_dl_dir
-        settings.PIKPAK_META_DIR = orig_meta_dir
-        settings.LOCK_PATH = orig_lock_path
-        settings.SPLIT_STRATEGY = orig_split_strategy
-        settings.E2E_CAPTURE_MODE = orig_capture_mode
-        settings.E2E_CAPTURE_DIR = orig_capture_dir
         return
 
     init_db()
@@ -232,16 +177,6 @@ def setup_test_db(request, tmp_dir, monkeypatch):
     client_manager._pool_init_task = None
     client_manager._shutting_down = False
     task_scheduler._is_running = False
-    settings.DB_PATH = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "tg_service.db"
-    )
-    settings.DATA_DIR = orig_data_dir
-    settings.DOWNLOAD_DIR = orig_dl_dir
-    settings.PIKPAK_META_DIR = orig_meta_dir
-    settings.LOCK_PATH = orig_lock_path
-    settings.SPLIT_STRATEGY = orig_split_strategy
-    settings.E2E_CAPTURE_MODE = orig_capture_mode
-    settings.E2E_CAPTURE_DIR = orig_capture_dir
 
 
 @pytest.fixture(autouse=True)
@@ -273,21 +208,30 @@ def admitted_business_api_unit_tests(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def sandbox_telethon_sessions(tmp_dir, monkeypatch):
-    """自动沙箱夹具: 拦截所有 Telethon 会话文件创建，强制重定向至 tmp_dir 沙箱，杜绝工程根目录残留"""
-    try:
-        import telethon
+def sandbox_telethon_sessions(tmp_dir, monkeypatch, request):
+    """允许本用例的临时会话和 E2E 夹具已创建的 scratch 副本。"""
+    import telethon
 
-        orig_init = telethon.TelegramClient.__init__
+    roots = [Path(tmp_dir).resolve()]
+    roots.extend(
+        Path(request.getfixturevalue(fixture)).resolve()
+        for fixture in ("tmp_path", "scratch_data_dir", "ui_scratch_dir")
+        if fixture in request.fixturenames
+    )
+    orig_init = telethon.TelegramClient.__init__
 
-        def patched_init(self, session, *args, **kwargs):
-            if isinstance(session, str) and not os.path.isabs(session):
-                session = os.path.join(tmp_dir, session)
-            return orig_init(self, session, *args, **kwargs)
+    def patched_init(self, session, *args, **kwargs):
+        if isinstance(session, (str, os.PathLike)) and session:
+            path = Path(tmp_dir) / session
+            if not str(path).endswith(".session"):
+                path = Path(str(path) + ".session")
+            path = path.resolve()
+            if not any(path.is_relative_to(root) for root in roots):
+                raise ValueError("Telegram session outside test sandbox")
+            session = str(path)
+        return orig_init(self, session, *args, **kwargs)
 
-        monkeypatch.setattr(telethon.TelegramClient, "__init__", patched_init)
-    except Exception:
-        pass
+    monkeypatch.setattr(telethon.TelegramClient, "__init__", patched_init)
 
 
 @pytest.fixture(autouse=True)

@@ -6,6 +6,7 @@
 - 原 test_p1_pikpak_relink_idempotency: PikPak 链接刷新与 Relink 幂等防重机制"""
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -71,6 +72,8 @@ def _reset_service_singletons():
 @pytest.fixture
 def fake_pikpak(tmp_dir, monkeypatch):
     """生成跨平台 launcher 并 patch PIKPAK_CLI_BIN; 返回 {set_scenario, events, reset_state}"""
+    monkeypatch.delenv("PIKPAK_TOKEN", raising=False)
+    monkeypatch.setattr(settings, "PIKPAK_TOKEN", None)
     if sys.platform == "win32":
         launcher = safe_write_bytes(
             os.path.join(tmp_dir, "fake_pikpak.cmd"),
@@ -428,7 +431,9 @@ async def test_token_passthrough_to_child_env(fake_pikpak, monkeypatch):
     monkeypatch.setattr(settings, "PIKPAK_TOKEN", FAKE_TOKEN)
     await _run_cli(["auth", "status"])
     env_with = fake_pikpak.events()[-1]["env"]
-    assert env_with.get("PIKPAK_TOKEN") == FAKE_TOKEN, "settings 有值时必须注入且值一致"
+    assert env_with.get("PIKPAK_TOKEN") == hashlib.sha256(FAKE_TOKEN.encode()).hexdigest(), (
+        "settings 有值时必须注入且值一致"
+    )
 
 
 @pytest.mark.asyncio

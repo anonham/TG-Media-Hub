@@ -142,6 +142,16 @@ async def test_forward_channel_real_chain(channel_stage, live_api, tg_reader, li
     final = live_api.wait_terminal(task_id, timeout=900)
     pikpak_probe.completed_or_env_skip(live_api, final)
 
+    history = live_api.get(
+        "/api/forward/history",
+        params={"source_chat": chat_ref, "target_chat": forward_target, "source_msg_id": media_id},
+    )
+    history.raise_for_status()
+    owned = {int(row["target_msg_id"]) for row in history.json()["data"] if row["task_id"] == task_id}
+    for msg_id in owned:
+        if msg_id > target_mark:
+            live_cleanup.register_message(forward_target, msg_id)
+
     receipt = live_api.get(f"/api/forward/receipt/{task_id}")
     assert receipt.status_code == 200, receipt.text
     data = receipt.json()["data"]
@@ -149,15 +159,7 @@ async def test_forward_channel_real_chain(channel_stage, live_api, tg_reader, li
     assert data["bad"] == 0, data
     assert data.get("dedup_skipped") in (0, None), data
 
-    history = live_api.get(
-        "/api/forward/history",
-        params={"source_chat": chat_ref, "target_chat": forward_target, "source_msg_id": media_id},
-    )
-    history.raise_for_status()
-    owned = {int(row["target_msg_id"]) for row in history.json()["data"] if row["task_id"] == task_id}
     assert len(owned) == 1 and min(owned) > target_mark, "缺少本轮转发任务的目标消息回执"
-    for msg_id in owned:
-        live_cleanup.register_message(forward_target, msg_id)
     new_ids = await tg_reader.collect_ids_after(target_entity, target_mark)
     assert owned.issubset(new_ids), f"频道中未找到本轮已转发消息 {owned}"
 

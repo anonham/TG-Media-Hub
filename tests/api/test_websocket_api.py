@@ -36,6 +36,7 @@ async def test_slow_client_isolation():
     fast_ws = AsyncMock()
     slow_ws = AsyncMock()
 
+    slow_started = asyncio.Event()
     slow_ws_event = asyncio.Event()
     received_by_fast = []
 
@@ -43,26 +44,26 @@ async def test_slow_client_isolation():
         received_by_fast.append(msg)
 
     async def slow_send(msg):
+        slow_started.set()
         await slow_ws_event.wait()
 
     fast_ws.send_json = AsyncMock(side_effect=fast_send)
     slow_ws.send_json = AsyncMock(side_effect=slow_send)
 
-    await connection_manager.connect(fast_ws)
-    await connection_manager.connect(slow_ws)
-
-    for i in range(5):
-        await connection_manager.broadcast({"seq": i})
-
-    await wait_until(lambda: len(received_by_fast) == 5, message="fast ws did not receive all 5 broadcasts")
-
-    # 正常客户端无需等待慢客户端，立即收到全部广播
-    assert len(received_by_fast) == 5
-    assert [m["seq"] for m in received_by_fast] == [0, 1, 2, 3, 4]
-
-    slow_ws_event.set()
-    connection_manager.disconnect(fast_ws)
-    connection_manager.disconnect(slow_ws)
+    try:
+        async with asyncio.timeout(3):
+            await connection_manager.connect(fast_ws)
+            await connection_manager.connect(slow_ws)
+            await connection_manager.broadcast({"seq": 0})
+            await slow_started.wait()
+            for i in range(1, 5):
+                await connection_manager.broadcast({"seq": i})
+            await wait_until(lambda: len(received_by_fast) == 5, message="fast ws did not receive all 5 broadcasts")
+            assert [m["seq"] for m in received_by_fast] == list(range(5))
+    finally:
+        slow_ws_event.set()
+        connection_manager.disconnect(fast_ws)
+        connection_manager.disconnect(slow_ws)
 
 
 @pytest.mark.asyncio

@@ -404,6 +404,7 @@ async def test_speed_measuring_provider():
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("no_download_file_writes")
 async def test_pikpak_stream_transport_engine_send_item_success():
     """PikPak 流式传输引擎：索链、虚拟切片、分块上传成功流程 (link 构造注入)"""
     engine = PikPakStreamTransportEngine(link_provider=AsyncMock(return_value=["https://cdn.pikpak/video.mp4"]))
@@ -412,6 +413,8 @@ async def test_pikpak_stream_transport_engine_send_item_success():
         name="test_video.mp4",
         size_bytes=10 * 1024 * 1024,
         duration_s=60,
+        width=1920,
+        height=1080,
         source_type="pikpak",
     )
     mock_client = AsyncMock()

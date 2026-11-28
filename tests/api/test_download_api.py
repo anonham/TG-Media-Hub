@@ -109,17 +109,24 @@ def test_link_history_partial_or_unresolved_does_not_block(links):
 
 def test_unreadable_link_history_does_not_block_submission(monkeypatch):
     path = record_download(10)
+    payload = {"links": "https://t.me/example/10"}
+    headers = auth_headers()
+    readable = client.post("/api/download/link", json=payload, headers=headers)
+    assert readable.status_code == 409
+    assert readable.json()["detail"]["code"] == "already_downloaded"
+
     stat_file = os.stat
+    denied_paths = []
 
     def guarded_stat(candidate, *args, **kwargs):
         if str(candidate) == str(path):
+            denied_paths.append(str(candidate))
             raise PermissionError("history file unreadable")
         return stat_file(candidate, *args, **kwargs)
 
     monkeypatch.setattr("app.db.download_repository.os.stat", guarded_stat)
-    response = client.post(
-        "/api/download/link", json={"links": "https://t.me/example/10\nhttps://t.me/example/11"}, headers=auth_headers()
-    )
+    response = client.post("/api/download/link", json=payload, headers=headers)
+    assert denied_paths, "the request never checked the unreadable history file"
     assert response.status_code == 200
     assert DownloadHistoryRepository.get_recent()[0]["file_path"] == str(path)
 

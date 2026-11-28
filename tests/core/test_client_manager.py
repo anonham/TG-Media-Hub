@@ -1000,10 +1000,10 @@ async def test_pool_recovery_does_not_connect_removed_bot_from_snapshot(monkeypa
     recovery = asyncio.create_task(manager._connect_remaining_pool())
     try:
         await asyncio.wait_for(started.wait(), timeout=2)
-        await manager.remove_bot(2)
+        await asyncio.wait_for(manager.remove_bot(2), timeout=2)
     finally:
         release.set()
-        await recovery
+        await asyncio.wait_for(recovery, timeout=2)
     assert await removed.connect() == "Bot 未启用或已移除"
     factory.assert_not_called()
 

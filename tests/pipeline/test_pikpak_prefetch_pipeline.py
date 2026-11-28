@@ -79,6 +79,7 @@ def _setup_mock_client():
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("no_download_file_writes")
 async def test_concurrent_prefetch_reorder_in_order(tmp_path, monkeypatch):
     """1. 乱序到达下保序提交测试:
     设置 prefetch_concurrency=4，故意给 part 0 设置大延迟，part 1,2,3 先完成；

@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import shutil
+import threading
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1243,7 +1244,7 @@ async def test_upload_worker_restart_reinitializes_sender(tmp_path, monkeypatch)
     def get_c():
         return current_concurrency
 
-    worker_1_handled_parts = []
+    worker_1_handled_part = asyncio.Event()
 
     async def mock_call(sender, req):
         nonlocal worker_1_first_sender
@@ -1252,7 +1253,7 @@ async def test_upload_worker_restart_reinitializes_sender(tmp_path, monkeypatch)
             if len(created_senders) >= 2 and sender == created_senders[1] and worker_1_first_sender is None:
                 worker_1_first_sender = sender
             if sender == worker_1_first_sender:
-                worker_1_handled_parts.append(req.file_part)
+                worker_1_handled_part.set()
             if req.file_part >= 5:
                 await gate_later_parts.wait()
             await asyncio.sleep(0.01)
@@ -1262,32 +1263,30 @@ async def test_upload_worker_restart_reinitializes_sender(tmp_path, monkeypatch)
     client._call = mock_call
 
     async def scale_controller():
-        # 等待 worker 1 处理至少一个分块
-        while not worker_1_handled_parts:
-            await asyncio.sleep(0.01)
-        # 触发缩容至 1
         nonlocal current_concurrency
-        current_concurrency = 1
-        # 等待 worker 1 退出且 close 被调用
-        await asyncio.wait_for(worker_1_closed.wait(), timeout=5.0)
-        # 此时 worker 1 已退出且 worker_senders.pop(1, None) 已完成
-        # 触发重新扩容至 2
-        current_concurrency = 2
-        # 等待 worker 1 重新拉起并创建了第 3 个 sender
-        await asyncio.wait_for(worker_1_restarted.wait(), timeout=5.0)
-        # 放行剩余分块
-        gate_later_parts.set()
+        try:
+            # 等待 worker 1 处理至少一个分块
+            await asyncio.wait_for(worker_1_handled_part.wait(), timeout=5)
+            # 触发缩容至 1
+            current_concurrency = 1
+            # 等待 worker 1 退出且 close 被调用
+            await asyncio.wait_for(worker_1_closed.wait(), timeout=5.0)
+            # 此时 worker 1 已退出且 worker_senders.pop(1, None) 已完成
+            # 触发重新扩容至 2
+            current_concurrency = 2
+            # 等待 worker 1 重新拉起并创建了第 3 个 sender
+            await asyncio.wait_for(worker_1_restarted.wait(), timeout=5.0)
+        finally:
+            gate_later_parts.set()
 
-    scale_task = asyncio.create_task(scale_controller())
-
-    res = await upload_file_parallel(
-        client,
-        str(test_file),
-        concurrency=2,
-        get_concurrency=get_c,
-        in_flight_per_connection=1,
-    )
-    await scale_task
+    async with asyncio.timeout(15), asyncio.TaskGroup() as group:
+        group.create_task(scale_controller())
+        upload = group.create_task(
+            upload_file_parallel(
+                client, str(test_file), concurrency=2, get_concurrency=get_c, in_flight_per_connection=1
+            )
+        )
+    res = upload.result()
 
     assert res.parts == num_chunks
     # 验证 Worker 1 重启时再次调用了 fake_create_sender，总共创建了至少 3 个 Sender (Worker 0, Worker 1 首次, Worker 1 重启)
@@ -2357,30 +2356,41 @@ async def test_download_single_client_floodwait_sleeps_cooldown(tmp_dir, monkeyp
 async def test_upload_meta_saver_flush_waits_for_inflight_worker_at_100pct(tmp_dir, monkeypatch):
     """#13: 即使完成度已达 100%，_UploadMetaSaver.flush 仍须等待在途后台写盘结束再返回。"""
     meta_path = os.path.join(tmp_dir, "race.upload.meta")
+    loop = asyncio.get_running_loop()
     started = asyncio.Event()
-    release_write = asyncio.Event()
+    release_write = threading.Event()
 
     def slow_write(path, data, sync=False, **kwargs):
-        started.set()
-        while not release_write.is_set():
-            time.sleep(0.01)
+        loop.call_soon_threadsafe(started.set)
+        if not release_write.wait(timeout=5):
+            raise TimeoutError("test did not release the disk writer")
 
     monkeypatch.setattr(fast_telethon.breakpoints, "_write_meta_disk_sync", slow_write)
 
     saver = fast_telethon.breakpoints._UploadMetaSaver(meta_path, 2 * CHUNK, 99, {0}, 2)
+    flush_task = None
     saver.trigger()
     try:
         await asyncio.wait_for(started.wait(), timeout=2.0)
 
         # 模拟最后一个分块已完成 (100%)
         saver.completed_parts.add(1)
-        flush_task = asyncio.create_task(saver.flush())
-        await asyncio.sleep(0.03)
+        entered_flush = asyncio.Event()
+
+        async def flush():
+            entered_flush.set()
+            await saver.flush()
+
+        flush_task = asyncio.create_task(flush())
+        await asyncio.wait_for(entered_flush.wait(), timeout=2)
         assert not flush_task.done(), "在途 save_task 尚未结束前 flush 不能提前返回"
 
     finally:
         release_write.set()
-    await asyncio.wait_for(flush_task, timeout=2.0)
+        if flush_task is not None:
+            await asyncio.wait_for(flush_task, timeout=2)
+        elif saver.save_task is not None:
+            await asyncio.wait_for(saver.save_task, timeout=2)
 
 
 def test_upload_fingerprint_detects_middle_change_with_preserved_mtime(tmp_path):

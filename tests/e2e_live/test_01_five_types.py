@@ -5,6 +5,7 @@
 会话清理账本, 会话结束删消息 → 删任务 (§3.2 清理口径)。
 """
 
+import asyncio
 import os
 import time
 
@@ -215,10 +216,12 @@ def _is_admission_rejected_fixture(item: dict) -> bool:
     return name.endswith(".d.ts") or (name.endswith(".ts") and "fake" in name)
 
 
-async def test_pikpak_publish_zero_disk(live_api, tg_reader, target_chat, live_cleanup, scratch_data_dir) -> None:
+async def test_pikpak_publish_sampled_downloads_growth(
+    live_api, tg_reader, target_chat, live_cleanup, managed_live_server
+) -> None:
     """E2E-LIVE-06 (承 E2E-STRAT-05 + VERIFICATION 场景 3): PikPak 零磁盘流式发布。
 
-    断言: 任务完成 + 传输全程 scratch/downloads 零字节增量 (零盘承诺) + 频道产物
+    断言: 任务完成 + 轮询采样时 downloads 目录无新增字节 + 频道产物
     到达。前置: PikPak logged_in 且配置 E2E_LIVE_PIKPAK_REMOTE_DIR 远端测试目录
     (auto_cleanup_mode=none, 不动网盘文件)。
     """
@@ -246,9 +249,9 @@ async def test_pikpak_publish_zero_disk(live_api, tg_reader, target_chat, live_c
         pytest.skip(f"无 userbot 会话可解析测试频道 {target_chat}: {exc}")
     mark = await tg_reader.max_message_id(chat)
     live_cleanup.register_watermark(target_chat, mark)
-    downloads_dir = scratch_data_dir / "downloads"
+    downloads_dir = managed_live_server.data_dir / "downloads"
     # 基线增量口径: downloads 在会话内跨用例持久 (前序下载用例的样本文件残留),
-    # 零盘断言语义为"本传输窗口零新增" —— 按文件快照计算新增字节 (基线文件删除不抵消)
+    # 此处仅观察采样点，短暂写入由离线传输测试检查。
     baseline = pikpak_probe.downloads_snapshot(downloads_dir)
 
     resp = live_api.post(
@@ -277,7 +280,7 @@ async def test_pikpak_publish_zero_disk(live_api, tg_reader, target_chat, live_c
     live_cleanup.register_task(task_id)
 
     deadline = time.monotonic() + 1800
-    max_disk = 0
+    sampled_growth = 0
     status = ""
     snapshot: dict = {}
     while time.monotonic() < deadline:
@@ -285,16 +288,18 @@ async def test_pikpak_publish_zero_disk(live_api, tg_reader, target_chat, live_c
         snap.raise_for_status()
         snapshot = snap.json()
         status = str(snapshot.get("status", ""))
-        max_disk = max(max_disk, pikpak_probe.downloads_added_bytes(downloads_dir, baseline))
+        sampled_growth = max(sampled_growth, pikpak_probe.downloads_added_bytes(downloads_dir, baseline))
         if status in api_client.TERMINAL_STATUSES or status == "paused":
             break
-        time.sleep(5)
-    assert status in api_client.TERMINAL_STATUSES or status == "paused", f"PikPak 发布在时限内未达终态: {status}"
+        await asyncio.sleep(5)
+    if status not in api_client.TERMINAL_STATUSES and status != "paused":
+        live_api.post(f"/api/tasks/{task_id}/cancel").raise_for_status()
+        pytest.fail(f"PikPak 发布在时限内未达终态: {status}")
     pikpak_probe.completed_or_env_skip(
         live_api, {"id": task_id, "status": status, "error_detail": snapshot.get("error_detail")}
     )
     assert snapshot["progress"]["processed_items"] == len(picked), snapshot["progress"]
-    assert max_disk == 0, f"零盘承诺被破坏: 传输期间 downloads 目录峰值 {max_disk} 字节"
+    assert sampled_growth == 0, f"采样发现 downloads 目录新增字节，最大值 {sampled_growth} 字节"
 
     msgs = await tg_reader.collect_messages_after(chat, mark)
     assert len(msgs) >= len(picked), f"频道新增消息数应 ≥ 文件数: 实得 {len(msgs)}"

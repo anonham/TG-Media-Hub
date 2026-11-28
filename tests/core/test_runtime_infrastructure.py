@@ -2492,16 +2492,25 @@ async def test_lifespan_shield_cancelled_still_waits_for_cleanup_before_lock_rel
         patch("app.main._cleanup_lifespan", side_effect=slow_cleanup),
     ):
         runner = asyncio.create_task(drive_lifespan())
-        await entered_lifespan.wait()
-        runner.cancel()
-        await cleanup_started.wait()
-        # 二次取消也不得在 cleanup 完成前提前释放单实例锁
-        runner.cancel()
-        await asyncio.sleep(0)
-        assert "release" not in events
-        release_cleanup.set()
-        with pytest.raises(asyncio.CancelledError):
-            await runner
+        try:
+            async with asyncio.timeout(3):
+                await entered_lifespan.wait()
+                runner.cancel()
+                await cleanup_started.wait()
+                runner.cancel()
+                await asyncio.sleep(0)
+                assert not runner.done() and "release" not in events
+                release_cleanup.set()
+                done, _ = await asyncio.wait({runner}, timeout=2)
+                assert runner in done and runner.cancelled()
+        finally:
+            release_cleanup.set()
+            if not runner.done():
+                runner.cancel()
+            done, _ = await asyncio.wait({runner}, timeout=3)
+            assert runner in done, "lifespan runner did not exit after releasing cleanup"
+            if not runner.cancelled():
+                runner.result()
 
     assert events == ["cleanup_start", "cleanup_done", "release"]
 

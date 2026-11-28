@@ -5,6 +5,7 @@ import time
 from unittest.mock import patch
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app.api.auth import issue_2fa_token
@@ -441,7 +442,13 @@ async def test_forward_channel_concurrent_submit_allows_only_one():
         failures = [r for r in results if isinstance(r, Exception)]
         assert len(successes) == 1
         assert len(failures) == 1
-        assert len(created_ids) == 1
+        winner = successes[0]["task_id"]
+        assert created_ids == [winner]
+        rejection = failures[0]
+        assert isinstance(rejection, HTTPException)
+        assert rejection.status_code == 400
+        assert "已有运行中/暂停中的转发任务" in rejection.detail
+        assert winner in rejection.detail
     finally:
         for tid in created_ids:
             TaskQueueRepository.delete(tid)

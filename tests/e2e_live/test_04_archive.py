@@ -58,7 +58,7 @@ def archive_stage(live_gate, live_api) -> dict:
     if season is None:
         pytest.skip("剧集A 缺 第一季/ 子目录 (归档层级锚点); 预置方式见 README")
     season_items = pikpak_probe.list_remote_page(live_api, season["file_id"])
-    all_season_file_ids = {str(i["file_id"]) for i in season_items if not i.get("is_dir") and i.get("file_id")}
+    all_season_ids = {str(i["file_id"]) for i in season_items if i.get("file_id")}
     video_exts = {ext.lower() for ext in app_settings.VIDEO_EXTENSIONS}
     leaves = [
         i
@@ -72,13 +72,13 @@ def archive_stage(live_gate, live_api) -> dict:
             f"第一季/ 无 <{env_gate.max_file_size_mb()} MiB 视频文件 (低阈值注入下超限或非视频会被跳过); 预置方式见 README"
         )
     leaf = sorted(leaves, key=lambda i: i.get("name") or "")[0]
-    unsubmitted_file_ids = all_season_file_ids - {str(leaf["file_id"])}
+    unsubmitted_ids = all_season_ids - {str(leaf["file_id"])}
     return {
         "test_dir_id": test_dir_id,
         "drama": drama,
         "season": season,
         "leaf": leaf,
-        "unsubmitted_file_ids": unsubmitted_file_ids,
+        "unsubmitted_ids": unsubmitted_ids,
         "remote_dir": remote_dir,
     }
 
@@ -174,24 +174,28 @@ async def test_structured_archive_dir_tree_and_source_prune(
         None,
     )
     assert archived_season is not None, "归档内应重建 剧集A/第一季/ 层级 (dir_tree 结构化归档)"
-    archived_names = [i.get("name") for i in pikpak_probe.list_remote_page(live_api, archived_season["file_id"])]
-    assert leaf_name in archived_names, f"归档第一季/ 应含 {leaf_name}: {archived_names}"
-
-    unsubmitted_ids: set[str] = archive_stage["unsubmitted_file_ids"]
     leaf_id = str(leaf["file_id"])
-    source_drama_items = pikpak_probe.list_remote_page(live_api, drama["file_id"])
-    source_season = next((i for i in source_drama_items if i.get("is_dir") and i.get("name") == "第一季"), None)
-    if source_season is None:
-        assert not unsubmitted_ids, f"源 第一季/ 尚有未提交文件 {unsubmitted_ids}, 不应被整目录删除"
-        return  # D2 空目录自底向上删除已生效 (仅单文件时 第一季 整目录移除)
-    residual_files = [
-        i for i in pikpak_probe.list_remote_page(live_api, source_season["file_id"]) if not i.get("is_dir")
-    ]
-    residual_ids = {str(i.get("file_id")) for i in residual_files}
-    residual_names = {str(i.get("name")) for i in residual_files}
-    assert leaf_id not in residual_ids and leaf_name not in residual_names, (
-        f"已提交叶子 {leaf_name} ({leaf_id}) 应已从源 第一季/ 移出: {[i.get('name') for i in residual_files]}"
+    archived_files = pikpak_probe.list_remote_page(live_api, archived_season["file_id"])
+    assert any(str(i["file_id"]) == leaf_id and i["name"] == leaf_name for i in archived_files), (
+        f"归档目录缺少本次提交的 {leaf_name} ({leaf_id})"
     )
-    assert unsubmitted_ids.issubset(residual_ids), (
-        f"未提交文件应保留在源 第一季/ 中: missing={unsubmitted_ids - residual_ids}"
-    )
+
+    _assert_source_preserved(live_api, archive_stage)
+
+
+def _assert_source_preserved(live_api, archive_stage):
+    drama_id = archive_stage["drama"]["file_id"]
+    season_id = archive_stage["season"]["file_id"]
+    leaf_id = str(archive_stage["leaf"]["file_id"])
+    unsubmitted_ids = archive_stage["unsubmitted_ids"]
+    parents = pikpak_probe.list_remote_page(live_api, archive_stage["test_dir_id"])
+    assert any(i["file_id"] == drama_id for i in parents), "选中的源根目录不应被裁剪"
+    seasons = pikpak_probe.list_remote_page(live_api, drama_id)
+    season_present = any(i["file_id"] == season_id for i in seasons)
+    if not unsubmitted_ids:
+        assert not season_present, "已移走唯一条目，空的源 第一季/ 应被裁剪"
+        return
+    assert season_present, f"源 第一季/ 尚有未提交文件或子目录 {unsubmitted_ids}"
+    residual = {str(i["file_id"]) for i in pikpak_probe.list_remote_page(live_api, season_id)}
+    assert leaf_id not in residual, f"已归档文件仍在源目录中: {leaf_id}"
+    assert unsubmitted_ids <= residual, f"源目录缺少未提交条目: {unsubmitted_ids - residual}"

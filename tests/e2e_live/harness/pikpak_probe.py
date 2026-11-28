@@ -97,12 +97,14 @@ def mentions_write_forbidden(text: str) -> bool:
         key in lowered
         for key in (
             "chatwriteforbidden",
+            "chat_write_forbidden",
+            "chatadminrequirederror",
             "chat_admin_required",
-            "forbidden",
-            "no permission to send",
-            "无发帖",
-            "发帖权限",
-            "写入权限",
+            "目标频道无发帖权限",
+            "非频道管理员，无发帖权限",
+            "you can't write in this chat",
+            "you can't send media in this chat",
+            "] 无发帖权限:",
         )
     )
 
@@ -114,7 +116,11 @@ def completed_or_env_skip(live_api: api_client.LiveApiClient, final: dict[str, A
         detail = str(final.get("error_detail") or "")
         if mentions_write_forbidden(detail):
             pytest.skip(f"测试频道无发帖权限 (服务器侧): {detail}")
-        logs = live_api.get(f"/api/tasks/{final['id']}/logs", params={"after_seq": 0, "limit": 200})
-        if logs.status_code == 200 and mentions_write_forbidden(logs.text):
-            pytest.skip(f"测试频道无发帖权限 (服务器侧日志): {detail}")
+        if not detail.strip():
+            logs = live_api.get(f"/api/tasks/{final['id']}/logs", params={"after_seq": 0, "limit": 200})
+            if logs.status_code == 200:
+                page = logs.json()
+                entries = page["logs"]
+                if entries and not page["has_more"] and mentions_write_forbidden(entries[-1]["message"]):
+                    pytest.skip("测试频道无发帖权限 (服务器侧日志)")
     assert final.get("status") == "completed", final.get("error_detail")
